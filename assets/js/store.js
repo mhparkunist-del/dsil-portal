@@ -20,6 +20,8 @@
      updateReview(id, patch)        -> Promise<Review>
      deleteReview(id)               -> Promise<void>
      openReview(id, pin)            -> Promise<Review|null> 열람 PIN 이 맞으면 전체 필드
+     listExports()                  -> Promise<ExportLog[]> (관리자) 내보내기 이력 – 지우지 않는 아카이브
+     createExport(log)              -> Promise<ExportLog>
      onChange(cb)                   -> unsubscribe()
      exportJSON() / importJSON(obj) -> (local only)
 
@@ -29,6 +31,8 @@
    Review  { id, createdAt, requesterId, requesterName, title, purpose, vendor, category,
              items:[{name, amount}], amount, note, pinHash,
              status:'pending'|'approved'|'rejected', projectId, approvedAmount, adminNote, processedAt, processedBy }
+   ExportLog { id, createdAt, exportedById, exportedBy, purpose, format:'csv'|'print', count, totalAmount,
+               filter:{from,to,projectId,includeRequests,includeReviews}, rows:[{kind,date,requester,title,category,project,code,amount,actual,provisional,by,note}] }
    ===================================================================== */
 (function () {
   'use strict';
@@ -99,6 +103,15 @@
         { id: rv2, createdAt: daysAgo(2), requesterId: 'demo-3', requesterName: '박철수', title: '플라즈마 에처 소모품 및 챔버 부품', purpose: '패키징 공정 안정화용 전극·실링 교체', vendor: 'A사 견적 1건 (2026-09-04)', category: 'material',
           items: [{ name: '전극 세트', amount: 6500000 }, { name: 'O-ring 및 실링 키트', amount: 1200000 }], amount: 7700000, note: '전극은 납기 6주', pinHash: DEMO_PIN_HASH,
           status: 'pending', projectId: null, approvedAmount: null, adminNote: '', processedAt: null, processedBy: null }
+      ],
+      exports: [
+        { id: uid(), createdAt: daysAgo(5), exportedById: 'demo-admin', exportedBy: '관리자', purpose: '8월 과제 할당 보고', format: 'print', count: 3, totalAmount: 7680000,
+          filter: { from: daysAgo(40).slice(0, 10), to: daysAgo(5).slice(0, 10), projectId: 'all', includeRequests: true, includeReviews: false },
+          rows: [
+            { key: 'req:seed-1', kind: '실집행', date: daysAgo(8).slice(0, 10), requester: '홍길동', title: 'HfO2 ALD 전구체 (TDMAH) 25 g', category: '재료비', project: '산화물 반도체 기반 DRAM 셀 소자 개발', code: '2026-B07', amount: 2400000, actual: 2400000, provisional: 0, by: '관리자', note: '' },
+            { key: 'req:seed-2', kind: '실집행', date: daysAgo(13).slice(0, 10), requester: '이영희', title: 'Keithley 2636B 케이블/픽스처', category: '장비구매비', project: '차세대 AI 반도체 모놀리식 3D 집적 기술', code: '2026-A01', amount: 780000, actual: 780000, provisional: 0, by: '관리자', note: '심의 승인분 1차 구매' },
+            { key: 'req:seed-3', kind: '실집행', date: daysAgo(19).slice(0, 10), requester: '박철수', title: 'Cu 필러 범프 시편 가공 외주', category: '연구활동비', project: '이종 집적 첨단 패키징 기초연구', code: '2025-C03', amount: 4500000, actual: 4500000, provisional: 0, by: '관리자', note: '패키징 실험용' }
+          ] }
       ]
     };
   }
@@ -119,6 +132,7 @@
       if (r.reviewId === undefined) r.reviewId = null;
     });
     if (!Array.isArray(data.reviews)) data.reviews = [];
+    if (!Array.isArray(data.exports)) data.exports = [];
     return data;
   }
 
@@ -139,7 +153,7 @@
     function read() {
       try { data = JSON.parse(localStorage.getItem(DATA_KEY) || 'null'); } catch (e) { data = null; }
       if (!data || !Array.isArray(data.projects) || !Array.isArray(data.requests)) {
-        data = cfg.seedDemoData ? seedData() : { projects: [], requests: [], reviews: [] };
+        data = cfg.seedDemoData ? seedData() : { projects: [], requests: [], reviews: [], exports: [] };
         write();
       } else {
         migrate(data, cfg);
@@ -281,6 +295,17 @@
         return hashPin(pin).then(function (h) { return h === rv.pinHash ? clone(rv) : null; });
       },
 
+      listExports: function () { return Promise.resolve(clone(data.exports)); },
+
+      /* 이력은 추가만 가능 (삭제 API 없음) */
+      createExport: function (log) {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var rec = Object.assign({ id: uid(), createdAt: nowISO(), exportedById: session.user.id, exportedBy: session.user.name }, log);
+        data.exports.unshift(rec);
+        write(); emit();
+        return Promise.resolve(clone(rec));
+      },
+
       onChange: function (cb) {
         listeners.push(cb);
         return function () { listeners = listeners.filter(function (x) { return x !== cb; }); };
@@ -362,6 +387,14 @@
 
   function toReviewLimited(row) {
     return { id: row.id, createdAt: row.created_at, requesterId: row.requester_id, requesterName: row.requester_name || '', title: row.title, status: row.status, processedAt: row.processed_at || null, limited: true };
+  }
+
+  function toExport(row) {
+    return {
+      id: row.id, createdAt: row.created_at, exportedById: row.exported_by, exportedBy: row.exported_by_name || '',
+      purpose: row.purpose || '', format: row.format || 'csv', count: Number(row.count) || 0, totalAmount: Number(row.total_amount) || 0,
+      filter: row.filter || {}, rows: Array.isArray(row.rows) ? row.rows : []
+    };
   }
 
   function fromReviewPatch(patch) {
@@ -507,6 +540,17 @@
         return client.rpc('open_review', { review_id: id, pin: String(pin) }).then(unwrap).then(function (rows) {
           return rows && rows.length ? toReview(rows[0]) : null;
         });
+      },
+
+      listExports: function () {
+        return client.from('export_logs').select('*').order('created_at', { ascending: false }).then(unwrap).then(function (rows) { return rows.map(toExport); });
+      },
+
+      createExport: function (log) {
+        var u = currentUser();
+        if (!u) return Promise.reject(new Error('로그인이 필요합니다.'));
+        var row = { exported_by: u.id, exported_by_name: u.name, purpose: log.purpose || '', format: log.format || 'csv', count: log.count || 0, total_amount: Math.round(Number(log.totalAmount) || 0), filter: log.filter || {}, rows: log.rows || [] };
+        return client.from('export_logs').insert(row).select().single().then(unwrap).then(toExport);
       },
 
       onChange: function (cb) {

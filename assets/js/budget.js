@@ -45,7 +45,11 @@
     editingProjectId: null,
     magicLinkSent: false,
     adminUnlocked: false,
-    query: { preset: 'month', from: '', to: '', status: 'all', category: 'all', projectId: 'all', q: '', mine: false, groupBy: 'none' }
+    query: { preset: 'month', from: '', to: '', status: 'all', category: 'all', projectId: 'all', q: '', mine: false, groupBy: 'none' },
+    exports: [],
+    exportFilter: { preset: 'month', from: '', to: '', projectId: 'all', includeRequests: true, includeReviews: true },
+    exportSel: null,          /* null = 목록 전체 선택, 아니면 { key: true } */
+    exportPurpose: ''
   };
 
   /* ---------- helpers ---------- */
@@ -311,11 +315,13 @@
     return Promise.all([
       store.listProjects(),
       store.listRequests(),
-      state.session ? store.listReviews({ full: full }) : Promise.resolve([])
+      state.session ? store.listReviews({ full: full }) : Promise.resolve([]),
+      full ? store.listExports() : Promise.resolve([])
     ]).then(function (res) {
       state.projects = res[0];
       state.requests = res[1].slice().sort(byNewest);
       state.reviews = res[2].slice().sort(byNewest);
+      state.exports = res[3].slice().sort(byNewest);
       state.reviewsFull = full;
       if ((state.tab === 'admin' || state.tab === 'budget') && !isAdminActive()) state.tab = 'requests';
     });
@@ -923,6 +929,8 @@
     }
     after += '</div>';
 
+    after += renderExportCards();
+
     if (store.mode === 'local') {
       after += '<div class="card card-backup"><div class="card-body d-flex align-items-center flex-wrap gap-2">'
         + '<div class="me-auto"><div class="fw-medium"><i class="ti ti-database-export me-1 text-primary"></i>데이터 백업 (로컬 모드)</div><div class="text-secondary small">로컬 모드 데이터는 이 브라우저에만 있습니다. JSON으로 내보내 공유하거나 다른 PC에서 가져올 수 있습니다.</div></div>'
@@ -943,6 +951,222 @@
       + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="show-review" title="상세"><i class="ti ti-eye"></i></button> '
       + '<button type="button" class="btn btn-sm btn-primary" data-action="approve-review">승인</button> '
       + '<button type="button" class="btn btn-sm btn-outline-danger" data-action="reject-review">반려</button></td></tr>';
+  }
+
+  /* ---------- 보고서 내보내기 · 이력 (관리자) ---------- */
+  function fmtDateTime(iso) {
+    if (!iso) return '';
+    var d = new Date(iso);
+    if (isNaN(d)) return esc(iso);
+    return fmtDate(iso) + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+  function exportById(id) { for (var i = 0; i < state.exports.length; i++) if (state.exports[i].id === id) return state.exports[i]; return null; }
+  function reportRange(f) { return f && (f.from || f.to) ? (f.from || '…') + ' ~ ' + (f.to || '…') : '전체 기간'; }
+
+  function applyExportForm(form) {
+    var v = readForm(form);
+    var f = state.exportFilter;
+    var changed = v.preset !== f.preset;
+    f.preset = v.preset; f.projectId = v.projectId; f.includeRequests = !!v.includeRequests; f.includeReviews = !!v.includeReviews;
+    if (f.preset === 'custom') {
+      if (changed && !f.from && !f.to) { var r = presetRange('month'); f.from = r.from; f.to = r.to; }
+      else { f.from = v.from || ''; f.to = v.to || ''; }
+    } else { var range = presetRange(f.preset); f.from = range.from; f.to = range.to; }
+  }
+
+  /* 내보내기 후보: 처리된 구매 요청(실집행) + 승인된 심의(가할당), 처리일 기준 */
+  function exportCandidates() {
+    var f = state.exportFilter;
+    var rows = [];
+    function inRange(d) { return !(f.from && d < f.from) && !(f.to && d > f.to); }
+    if (f.includeRequests) {
+      state.requests.forEach(function (r) {
+        if (r.status !== 'done') return;
+        var d = localDate(r.processedAt || r.createdAt);
+        if (!inRange(d) || (f.projectId !== 'all' && r.projectId !== f.projectId)) return;
+        var p = projectById(r.projectId);
+        rows.push({ key: 'req:' + r.id, kind: '실집행', date: d, requester: r.requesterName, title: r.item, category: catLabel(normCat(r.category)),
+          project: p ? p.name : '', code: p ? p.code : '', amount: Number(r.amount) || 0, actual: Number(r.amount) || 0, provisional: 0, by: r.processedBy || '', note: r.note || '' });
+      });
+    }
+    if (f.includeReviews) {
+      state.reviews.forEach(function (rv) {
+        if (rv.status !== 'approved') return;
+        var d = localDate(rv.processedAt || rv.createdAt);
+        if (!inRange(d) || (f.projectId !== 'all' && rv.projectId !== f.projectId)) return;
+        var p = projectById(rv.projectId);
+        rows.push({ key: 'rv:' + rv.id, kind: '가할당', date: d, requester: rv.requesterName, title: rv.title, category: catLabel(normCat(rv.category)),
+          project: p ? p.name : '', code: p ? p.code : '', amount: reviewApproved(rv), actual: reviewActual(rv), provisional: reviewProvisional(rv), by: rv.processedBy || '', note: rv.adminNote || '' });
+      });
+    }
+    rows.sort(function (a, b) { return b.date.localeCompare(a.date); });
+    return rows;
+  }
+  function isSelected(key) { return state.exportSel === null || !!state.exportSel[key]; }
+  function selectedRows() { return exportCandidates().filter(function (x) { return isSelected(x.key); }); }
+  function toggleExportRow(key, on) {
+    if (state.exportSel === null) { state.exportSel = {}; exportCandidates().forEach(function (x) { state.exportSel[x.key] = true; }); }
+    if (on) state.exportSel[key] = true; else delete state.exportSel[key];
+  }
+
+  function renderExportCards() {
+    var f = state.exportFilter;
+    var rows = exportCandidates();
+    var sel = selectedRows();
+    var total = sel.reduce(function (s, x) { return s + x.amount; }, 0);
+    var projOpts = '<option value="all">모든 과제</option>' + state.projects.map(function (p) {
+      return '<option value="' + esc(p.id) + '"' + (f.projectId === p.id ? ' selected' : '') + '>' + esc((p.code ? p.code + ' ' : '') + p.name) + '</option>';
+    }).join('');
+
+    var html = '<div class="card mb-3"><div class="card-header"><div><h3 class="card-title mb-0"><i class="ti ti-report me-1 text-primary"></i>보고서 내보내기 <span class="text-secondary fw-normal">승인건</span></h3>'
+      + '<div class="text-secondary small mt-1">교수님께 과제 할당을 보고할 때 씁니다. 내보내면 아래 이력에 내보낸 사람·시각·항목이 남습니다.</div></div></div>'
+      + '<div class="card-body border-bottom"><form id="export-form"><div class="row g-2 align-items-end">'
+      + '<div class="col-6 col-md-3 col-xl-2"><label class="form-label">기간 <span class="form-label-description">처리일</span></label><select class="form-select" name="preset">'
+      + PRESETS.map(function (p) { return '<option value="' + p.id + '"' + (f.preset === p.id ? ' selected' : '') + '>' + p.label + '</option>'; }).join('') + '</select></div>'
+      + '<div class="col-6 col-md-3 col-xl-2' + (f.preset === 'custom' ? '' : ' d-none') + '"><label class="form-label">시작일</label><input type="date" class="form-control" name="from" value="' + esc(f.from) + '"></div>'
+      + '<div class="col-6 col-md-3 col-xl-2' + (f.preset === 'custom' ? '' : ' d-none') + '"><label class="form-label">종료일</label><input type="date" class="form-control" name="to" value="' + esc(f.to) + '"></div>'
+      + '<div class="col-12 col-md-6 col-xl-4"><label class="form-label">과제</label><select class="form-select" name="projectId">' + projOpts + '</select></div>'
+      + '<div class="col-12 col-md-6 col-xl-4"><label class="form-label">포함</label><div class="d-flex gap-3 pb-2">'
+      + '<label class="form-check mb-0"><input class="form-check-input" type="checkbox" name="includeRequests"' + (f.includeRequests ? ' checked' : '') + '><span class="form-check-label">실집행 (처리된 구매건)</span></label>'
+      + '<label class="form-check mb-0"><input class="form-check-input" type="checkbox" name="includeReviews"' + (f.includeReviews ? ' checked' : '') + '><span class="form-check-label">가할당 (승인된 심의)</span></label></div></div>'
+      + '</div></form></div>';
+
+    if (!rows.length) {
+      html += '<div class="card-body">' + empty('file-off', '조건에 맞는 승인건이 없습니다', '기간이나 포함 항목을 바꿔 보세요.') + '</div>';
+    } else {
+      html += '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr>'
+        + '<th class="w-1"><input class="form-check-input m-0" type="checkbox" data-action="export-select-all"' + (state.exportSel === null ? ' checked' : '') + ' aria-label="전체 선택"></th>'
+        + '<th class="w-1">유형</th><th class="w-1">처리일</th><th class="w-1">신청자</th><th>항목</th><th>과제</th><th class="text-end">금액</th></tr></thead><tbody>';
+      rows.forEach(function (x) {
+        html += '<tr data-key="' + esc(x.key) + '"' + (isSelected(x.key) ? '' : ' class="text-secondary"') + '><td><input class="form-check-input m-0" type="checkbox" data-action="export-select"' + (isSelected(x.key) ? ' checked' : '') + ' aria-label="선택"></td>'
+          + '<td><span class="badge ' + (x.kind === '실집행' ? 'bg-blue-lt' : 'bg-green-lt') + '">' + x.kind + '</span></td>'
+          + '<td class="text-nowrap">' + esc(x.date.replace(/-/g, '.')) + '</td>'
+          + '<td class="text-nowrap">' + esc(x.requester) + '</td>'
+          + '<td><div class="fw-medium">' + esc(x.title) + '</div><div class="small text-secondary"><span class="badge badge-outline text-primary me-1">' + esc(x.category) + '</span>'
+          + (x.kind === '가할당' ? '실집행 ' + won(x.actual) + ' · 잔여 ' + won(x.provisional) : esc(x.note)) + '</div></td>'
+          + '<td>' + esc(x.project) + '<div class="small text-secondary">' + esc(x.code) + '</div></td>'
+          + '<td class="text-end tnum text-nowrap">' + won(x.amount) + '</td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '<div class="card-body d-flex flex-wrap align-items-center gap-2">'
+      + '<div class="me-auto"><strong>' + sel.length + '건</strong> 선택 · 합계 <span class="tnum fw-medium">' + won(total) + '</span></div>'
+      + '<input type="text" class="form-control" style="max-width:300px" id="export-purpose" value="' + esc(state.exportPurpose) + '" placeholder="보고 메모 (예: 9월 과제 할당 보고)">'
+      + '<button type="button" class="btn" data-action="export-csv-report"' + (sel.length ? '' : ' disabled') + '><i class="ti ti-file-spreadsheet me-1"></i>CSV</button>'
+      + '<button type="button" class="btn btn-primary" data-action="export-print-report"' + (sel.length ? '' : ' disabled') + '><i class="ti ti-printer me-1"></i>인쇄용 보고서</button>'
+      + '</div></div>';
+
+    html += '<div class="card mb-3"><div class="card-header"><h3 class="card-title"><i class="ti ti-archive me-1 text-primary"></i>내보내기 이력 <span class="text-secondary fw-normal">' + state.exports.length + '건</span></h3>'
+      + '<div class="card-actions small text-secondary">기록은 지워지지 않으며 당시 스냅샷을 그대로 다시 받을 수 있습니다</div></div>';
+    if (!state.exports.length) {
+      html += '<div class="card-body">' + empty('archive-off', '아직 내보낸 기록이 없습니다', '') + '</div>';
+    } else {
+      html += '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr>'
+        + '<th class="w-1">일시</th><th class="w-1">내보낸 사람</th><th>메모 · 조건</th><th class="w-1">형식</th><th class="text-end">건수</th><th class="text-end">합계</th><th class="w-1"></th></tr></thead><tbody>';
+      state.exports.forEach(function (lg) {
+        var inc = [];
+        if (lg.filter && lg.filter.includeRequests) inc.push('실집행');
+        if (lg.filter && lg.filter.includeReviews) inc.push('가할당');
+        var pj = lg.filter && lg.filter.projectId && lg.filter.projectId !== 'all' ? projectById(lg.filter.projectId) : null;
+        html += '<tr data-id="' + esc(lg.id) + '"><td class="text-nowrap">' + fmtDateTime(lg.createdAt) + '</td>'
+          + '<td class="text-nowrap">' + esc(lg.exportedBy) + '</td>'
+          + '<td><div class="fw-medium">' + (lg.purpose ? esc(lg.purpose) : '<span class="text-secondary">메모 없음</span>') + '</div>'
+          + '<div class="small text-secondary">' + esc(reportRange(lg.filter)) + ' · ' + esc(inc.join('+') || '-') + (pj ? ' · ' + esc(pj.code || pj.name) : ' · 모든 과제') + '</div></td>'
+          + '<td><span class="badge bg-secondary-lt">' + (lg.format === 'print' ? '보고서' : 'CSV') + '</span></td>'
+          + '<td class="text-end tnum">' + esc(lg.count) + '</td>'
+          + '<td class="text-end tnum text-nowrap">' + won(lg.totalAmount) + '</td>'
+          + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="show-export" title="포함 항목 보기"><i class="ti ti-eye"></i></button>'
+          + '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="redownload-export" title="CSV 다시 받기"><i class="ti ti-download"></i></button>'
+          + '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="reprint-export" title="보고서 다시 열기"><i class="ti ti-printer"></i></button></td></tr>';
+      });
+      html += '</tbody></table></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function doExport(format) {
+    var rows = selectedRows();
+    if (!rows.length) { toast('내보낼 항목을 선택하세요.', true); return; }
+    var w = format === 'print' ? window.open('', '_blank') : null;
+    if (format === 'print' && !w) { toast('팝업이 차단되었습니다. 이 사이트의 팝업을 허용해 주세요.', true); return; }
+    var f = state.exportFilter;
+    var rec = {
+      purpose: (state.exportPurpose || '').trim(), format: format, count: rows.length,
+      totalAmount: rows.reduce(function (s, x) { return s + x.amount; }, 0),
+      filter: { from: f.from, to: f.to, projectId: f.projectId, includeRequests: f.includeRequests, includeReviews: f.includeReviews },
+      rows: rows.map(function (x) { return { key: x.key, kind: x.kind, date: x.date, requester: x.requester, title: x.title, category: x.category, project: x.project, code: x.code, amount: x.amount, actual: x.actual, provisional: x.provisional, by: x.by, note: x.note }; })
+    };
+    store.createExport(rec).then(function (log) {
+      if (format === 'csv') downloadReportCsv(log); else openPrintReport(log, w);
+      toast('내보내기 완료 · 이력에 기록했습니다.');
+      state.exportPurpose = '';
+      touchUnlock();
+      return refresh();
+    }).catch(function (err) { if (w) w.close(); handleError(err); });
+  }
+
+  function downloadReportCsv(log) {
+    var head = ['유형', '처리일', '신청자', '항목', '비목', '과제', '과제번호', '금액', '실집행', '가할당 잔여', '처리자', '메모'];
+    var lines = (log.rows || []).map(function (x) {
+      return [x.kind, x.date, x.requester, x.title, x.category, x.project, x.code, x.amount, x.actual, x.provisional, x.by, x.note].map(csvCell).join(',');
+    });
+    lines.push(['합계', '', '', '', '', '', '', log.totalAmount, '', '', '', ''].map(csvCell).join(','));
+    var meta = csvCell('DSIL 과제 할당 보고 · ' + reportRange(log.filter) + ' · 내보낸 사람 ' + log.exportedBy + ' · ' + fmtDateTime(log.createdAt) + (log.purpose ? ' · ' + log.purpose : ''));
+    download('dsil-report-' + localDate(log.createdAt) + '.csv', '﻿' + meta + '\r\n' + head.join(',') + '\r\n' + lines.join('\r\n'), 'text/csv;charset=utf-8');
+  }
+
+  function openPrintReport(log, w) {
+    if (!w) { w = window.open('', '_blank'); }
+    if (!w) { toast('팝업이 차단되었습니다. 이 사이트의 팝업을 허용해 주세요.', true); return; }
+    var groups = [], map = {};
+    var sumActual = 0, sumProv = 0;
+    (log.rows || []).forEach(function (x) {
+      var k = x.code + '|' + x.project;
+      if (!map[k]) { map[k] = { project: x.project, code: x.code, rows: [], amount: 0 }; groups.push(map[k]); }
+      map[k].rows.push(x); map[k].amount += Number(x.amount) || 0;
+      if (x.kind === '실집행') sumActual += Number(x.amount) || 0; else sumProv += Number(x.amount) || 0;
+    });
+    var body = groups.map(function (g) {
+      return '<h2>' + esc(g.project || '(과제 미지정)') + (g.code ? ' <span class="code">' + esc(g.code) + '</span>' : '') + '</h2>'
+        + '<table><thead><tr><th>유형</th><th>처리일</th><th>신청자</th><th>항목</th><th>비목</th><th class="num">금액</th><th>비고</th></tr></thead><tbody>'
+        + g.rows.map(function (x) {
+          return '<tr><td><span class="kind' + (x.kind === '가할당' ? ' prov' : '') + '">' + x.kind + '</span></td><td>' + esc(x.date.replace(/-/g, '.')) + '</td><td>' + esc(x.requester) + '</td><td>' + esc(x.title) + '</td><td>' + esc(x.category) + '</td>'
+            + '<td class="num">' + won(x.amount) + '</td><td class="muted">' + (x.kind === '가할당' ? '실집행 ' + won(x.actual) + ' · 잔여 ' + won(x.provisional) : esc(x.note)) + '</td></tr>';
+        }).join('')
+        + '<tr class="sub"><td colspan="5">소계 · ' + g.rows.length + '건</td><td class="num">' + won(g.amount) + '</td><td></td></tr>'
+        + '</tbody></table>';
+    }).join('');
+    var html = '<!DOCTYPE html><html lang="ko"><head><meta charset="utf-8"><title>DSIL 과제 할당 보고 ' + esc(localDate(log.createdAt)) + '</title>'
+      + '<style>body{font-family:Pretendard,"Malgun Gothic","Apple SD Gothic Neo",sans-serif;margin:36px;color:#111;line-height:1.5}'
+      + 'h1{font-size:20px;color:#0c2f5f;border-bottom:3px solid #004191;padding-bottom:8px;margin:0 0 6px}h2{font-size:14px;margin:22px 0 6px;color:#0c2f5f}.code{font-weight:400;color:#555;font-size:12px}'
+      + '.meta{color:#555;font-size:12.5px;margin-bottom:8px}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border-bottom:1px solid #ddd;padding:5px 7px;text-align:left;vertical-align:top}th{background:#f3f5f8;font-weight:600}'
+      + 'td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}.sub td{background:#fafbfd;font-weight:600}.muted{color:#666}'
+      + '.kind{font-size:10.5px;padding:1px 6px;border-radius:4px;background:#e8eef8;color:#004191;white-space:nowrap}.kind.prov{background:#e6f4ea;color:#1a7f37}'
+      + '.total{margin-top:22px;border:1px solid #ddd;padding:10px 14px;display:flex;gap:28px;font-size:13px}.total strong{font-variant-numeric:tabular-nums}'
+      + '.actions{margin-top:24px}.actions button{font:inherit;padding:8px 14px;border:1px solid #004191;background:#004191;color:#fff;border-radius:6px;cursor:pointer}'
+      + '@media print{.actions{display:none}body{margin:12mm}}</style></head><body>'
+      + '<h1>DSIL 과제 할당 보고</h1>'
+      + '<div class="meta">기간 ' + esc(reportRange(log.filter)) + ' (처리일 기준) · 내보낸 사람 ' + esc(log.exportedBy) + ' · ' + esc(fmtDateTime(log.createdAt)) + (log.purpose ? ' · ' + esc(log.purpose) : '') + '</div>'
+      + '<div class="meta">실집행 = 처리된 구매 요청, 가할당 = 승인된 구매 심의 중 아직 집행되지 않은 배정액</div>'
+      + body
+      + '<div class="total"><span>실집행 <strong>' + won(sumActual) + '</strong></span><span>가할당(승인) <strong>' + won(sumProv) + '</strong></span><span>총계 <strong>' + won(log.totalAmount) + '</strong> · ' + esc(log.count) + '건</span></div>'
+      + '<div class="actions"><button type="button" onclick="window.print()">인쇄 / PDF 저장</button></div>'
+      + '</body></html>';
+    w.document.open(); w.document.write(html); w.document.close();
+  }
+
+  function showExportLog(log) {
+    var html = '<div class="datagrid mb-3">'
+      + dg('일시', fmtDateTime(log.createdAt)) + dg('내보낸 사람', esc(log.exportedBy)) + dg('형식', log.format === 'print' ? '인쇄용 보고서' : 'CSV')
+      + dg('기간', esc(reportRange(log.filter))) + dg('건수 · 합계', esc(log.count) + '건 · <span class="tnum">' + won(log.totalAmount) + '</span>')
+      + (log.purpose ? dg('메모', esc(log.purpose)) : '') + '</div>'
+      + '<div class="table-responsive"><table class="table table-sm table-vcenter mb-0"><thead><tr><th>유형</th><th>처리일</th><th>신청자</th><th>항목</th><th>과제</th><th class="text-end">금액</th></tr></thead><tbody>'
+      + (log.rows || []).map(function (x) {
+        return '<tr><td><span class="badge ' + (x.kind === '실집행' ? 'bg-blue-lt' : 'bg-green-lt') + '">' + x.kind + '</span></td><td class="text-nowrap">' + esc(x.date.replace(/-/g, '.')) + '</td><td class="text-nowrap">' + esc(x.requester) + '</td>'
+          + '<td>' + esc(x.title) + ' <span class="text-secondary small">' + esc(x.category) + '</span></td><td>' + esc(x.code || x.project) + '</td><td class="text-end tnum">' + won(x.amount) + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+    return dialog({ title: '내보내기 이력 · ' + fmtDateTime(log.createdAt), html: html, size: 'lg', okLabel: '닫기', hideCancel: true });
   }
 
   /* ---------- 요청 수정 모달 ---------- */
@@ -1089,6 +1313,7 @@
     }
     var vf = e.target.closest('#review-form');
     if (vf) { updateReviewTotals(vf); return; }
+    if (e.target.id === 'export-purpose') { state.exportPurpose = e.target.value; return; }
     var pf = e.target.closest('#project-form');
     if (pf) {
       var total = 0;
@@ -1103,6 +1328,10 @@
     var role = el.getAttribute('data-role');
     var qf = el.closest('#query-form');
     if (qf && el.name !== 'q') { applyQueryForm(qf); render(); return; }
+    var xf = el.closest('#export-form');
+    if (xf) { applyExportForm(xf); state.exportSel = null; render(); return; }
+    if (action === 'export-select-all') { state.exportSel = el.checked ? null : {}; render(); return; }
+    if (action === 'export-select') { toggleExportRow(el.closest('tr[data-key]').getAttribute('data-key'), el.checked); render(); return; }
     if (action === 'import' && el.files && el.files[0]) {
       var reader = new FileReader();
       reader.onload = function () {
@@ -1250,6 +1479,22 @@
           return store.deleteProject(id).then(function () { toast('과제를 삭제했습니다.'); touchUnlock(); return refresh(); });
         }).catch(handleError);
         break;
+      case 'export-csv-report':
+        doExport('csv'); break;
+      case 'export-print-report':
+        doExport('print'); break;
+      case 'show-export': {
+        var lg = exportById(id); if (lg) showExportLog(lg);
+        break;
+      }
+      case 'redownload-export': {
+        var lg2 = exportById(id); if (lg2) downloadReportCsv(lg2);
+        break;
+      }
+      case 'reprint-export': {
+        var lg3 = exportById(id); if (lg3) openPrintReport(lg3, window.open('', '_blank'));
+        break;
+      }
       case 'export':
         download('dsil-budget-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(store.exportJSON(), null, 2));
         break;
@@ -1265,7 +1510,10 @@
   /* ---------- boot ---------- */
   var initialTab = (window.location.hash || '').replace('#', '');
   if (TABS.indexOf(initialTab) >= 0) state.tab = initialTab;
-  (function () { var r = presetRange(state.query.preset); state.query.from = r.from; state.query.to = r.to; })();
+  (function () {
+    var r = presetRange(state.query.preset); state.query.from = r.from; state.query.to = r.to;
+    var x = presetRange(state.exportFilter.preset); state.exportFilter.from = x.from; state.exportFilter.to = x.to;
+  })();
 
   store.init().then(function () {
     state.ready = true;

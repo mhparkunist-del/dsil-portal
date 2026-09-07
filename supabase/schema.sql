@@ -141,6 +141,24 @@ create index if not exists requests_category_idx on public.requests (project_id,
 create index if not exists requests_review_idx   on public.requests (review_id);
 
 -- ---------------------------------------------------------------------
+-- export_logs : 보고서 내보내기 이력 (관리자 전용 아카이브, 추가만 가능)
+--   rows 에 내보낸 시점의 스냅샷을 그대로 저장하므로 나중에 같은 보고서를 다시 받을 수 있습니다.
+-- ---------------------------------------------------------------------
+create table if not exists public.export_logs (
+  id                uuid primary key default gen_random_uuid(),
+  created_at        timestamptz not null default now(),
+  exported_by       uuid references auth.users (id),
+  exported_by_name  text not null default '',
+  purpose           text not null default '',
+  format            text not null default 'csv' check (format in ('csv', 'print')),
+  count             integer not null default 0,
+  total_amount      bigint not null default 0,
+  filter            jsonb not null default '{}'::jsonb,
+  rows              jsonb not null default '[]'::jsonb
+);
+create index if not exists export_logs_created_idx on public.export_logs (created_at desc);
+
+-- ---------------------------------------------------------------------
 -- 신청자용 심의 상태 뷰 (내용 없이 상태만, 본인 것만)
 --   뷰는 소유자 권한으로 실행되므로 reviews 의 RLS(관리자만 select)를 우회하되
 --   where 절로 본인 행만 노출합니다.
@@ -269,6 +287,13 @@ create policy "reviews: insert own"  on public.reviews for insert to authenticat
 create policy "reviews: admin write" on public.reviews for update to authenticated using (public.is_admin()) with check (public.is_admin());
 drop policy if exists "reviews: admin delete" on public.reviews;
 create policy "reviews: admin delete" on public.reviews for delete to authenticated using (public.is_admin());
+
+-- 내보내기 이력: 관리자만 읽고 추가. update/delete 정책이 없으므로 API 로는 지울 수 없습니다.
+alter table public.export_logs enable row level security;
+drop policy if exists "export_logs: admin read"   on public.export_logs;
+drop policy if exists "export_logs: admin insert" on public.export_logs;
+create policy "export_logs: admin read"   on public.export_logs for select to authenticated using (public.is_admin());
+create policy "export_logs: admin insert" on public.export_logs for insert to authenticated with check (public.is_admin() and exported_by = auth.uid());
 
 -- 실시간 반영 (대시보드 자동 갱신)
 do $$
