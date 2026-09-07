@@ -70,9 +70,10 @@ python -m http.server 8000
 
 ## GitHub Pages 배포
 
-1. 저장소 → Settings → Pages → Source: **Deploy from a branch**, Branch: `main` / `(root)`
-2. 1~2분 뒤 `https://<계정>.github.io/dsil-portal/` 에서 열립니다.
-3. 나중에 `DSIL-lab` 조직으로 옮기면 `portal.dsil.kaist.ac.kr` 같은 서브도메인을 CNAME 으로 붙일 수 있습니다.
+배포 주소: **https://mhparkunist-del.github.io/dsil-portal/** (예산 관리: `/budget/`)
+
+- Settings → Pages → Source: **Deploy from a branch**, Branch: `main` / `(root)` 로 설정되어 있습니다. `main` 에 push 하면 1~2분 뒤 자동 반영됩니다.
+- 나중에 `DSIL-lab` 조직으로 옮기면 `portal.dsil.kaist.ac.kr` 같은 서브도메인을 CNAME 으로 붙일 수 있습니다.
 
 ## 다음 도구 후보
 
