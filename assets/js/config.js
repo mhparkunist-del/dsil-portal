@@ -13,8 +13,18 @@ window.DSIL_CONFIG = {
   supabaseUrl: '',
   supabaseAnonKey: '',
 
-  /* local 모드에서 관리자 화면으로 전환할 때 쓰는 PIN (공용 DB 모드에서는 profiles.is_admin 사용) */
+  /* 관리자 탭에 들어갈 때마다 묻는 PIN. 공용 DB 모드에서는 profiles.is_admin 인 사람만 이 단계까지 옵니다. */
   adminPin: '0000',
+  /* PIN 을 맞힌 뒤 관리자 잠금이 유지되는 시간(분). 지나면 다시 묻습니다. */
+  adminUnlockMinutes: 10,
+
+  /* 과제 예산 비목. id 는 저장 키이므로 운영 중에 바꾸지 마세요. label 은 자유롭게 수정 가능. */
+  budgetCategories: [
+    { id: 'material',  label: '재료비' },
+    { id: 'activity',  label: '연구활동비' },
+    { id: 'equipment', label: '장비구매비' },
+    { id: 'other',     label: '기타' }
+  ],
 
   /* local 모드 첫 실행 시 예시 과제·요청을 채워 넣을지 여부 */
   seedDemoData: true,
@@ -23,6 +33,5 @@ window.DSIL_CONFIG = {
   warnRatio: 0.8,
 
   labName: 'Device-to-System Integration Lab (DSIL)',
-  university: 'KAIST',
-  address: 'Room 2302, Building E3-3 (Device Innovation Facility), KAIST, 291 Daehak-ro, Yuseong-gu, Daejeon 34141, Republic of Korea',
+  university: 'KAIST'
 };

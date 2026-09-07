@@ -1,0 +1,80 @@
+/* =====================================================================
+   DSIL Lab Portal – overrides on top of Tabler (https://tabler.io, MIT)
+   Keeps the DSIL identity (KAIST blue #004191, thin blue strip) while
+   Tabler supplies the layout, components and spacing.
+   ===================================================================== */
+
+:root,
+[data-bs-theme="light"] {
+  --tblr-primary: #004191;
+  --tblr-primary-rgb: 0, 65, 145;
+  --tblr-primary-darken: #0c2f5f;
+  --tblr-primary-lt: #e5ecf6;
+  --tblr-blue: #004191;
+  --tblr-blue-rgb: 0, 65, 145;
+  --tblr-link-color: #004191;
+  --tblr-link-hover-color: #0c2f5f;
+  --tblr-font-sans-serif: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, system-ui, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", Roboto, sans-serif;
+  --portal-accent: #8C1515;
+}
+
+html { color-scheme: light; }
+
+/* Thin KAIST strip above the navbar – the one element carried over from dsil.kaist.ac.kr */
+.kaist-strip {
+  background: var(--tblr-primary);
+  color: #fff;
+  font-size: 0.7rem;
+  letter-spacing: 0.02em;
+  padding: 4px 0;
+}
+.kaist-strip a { color: #fff; opacity: 0.85; text-decoration: none; }
+.kaist-strip a:hover { opacity: 1; }
+
+.navbar .navbar-brand-image { height: 2rem; width: auto; }
+.brand-tag { font-size: 0.6rem; letter-spacing: 0.08em; text-transform: uppercase; }
+
+@media (max-width: 575.98px) {
+  .navbar .navbar-brand-image { height: 1.5rem; }
+  .brand-tag { display: none; }
+  .kaist-strip-text { display: none; }
+}
+
+.page-header .page-title { text-wrap: balance; }
+
+.page-title { font-weight: 700; }
+
+.tnum { font-variant-numeric: tabular-nums; }
+.progress-xs { height: 3px; }
+
+/* Tool cards on the portal home */
+.tool-card .avatar { --tblr-avatar-size: 3rem; font-size: 1.4rem; }
+.card-soon { opacity: 0.55; }
+
+/* Category budget rows inside a project card */
+.cat-row + .cat-row { margin-top: 0.6rem; }
+
+/* Toast (fixed alert) */
+.portal-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.25rem;
+  transform: translateX(-50%) translateY(12px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 1090;
+  max-width: min(90vw, 480px);
+  margin: 0;
+}
+.portal-toast.is-visible { opacity: 1; transform: translateX(-50%); }
+
+/* Modal rendered without Bootstrap JS */
+.modal.is-open { display: block; }
+
+.table td .sub { display: block; font-size: 0.8rem; color: var(--tblr-secondary); }
+.table select.form-select-sm { min-width: 11rem; }
+
+@media (prefers-reduced-motion: reduce) {
+  .portal-toast, .card-link { transition: none; }
+}

@@ -1,98 +1,166 @@
 <!DOCTYPE html>
-<html lang="ko">
+<html lang="ko" data-bs-theme="light">
 <head>
   <meta charset="utf-8">
   <title>DSIL Lab Portal</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="description" content="KAIST Device-to-System Integration Lab (DSIL) 연구실 내부 포털. 과제별 예산 관리 등 연구실 운영 도구 모음.">
   <link rel="icon" href="assets/img/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
-  <link rel="stylesheet" href="assets/css/main.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.5.0/dist/css/tabler.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.46.0/dist/tabler-icons.min.css">
+  <link rel="stylesheet" href="assets/css/portal.css">
 </head>
 <body>
-  <nav class="site-nav">
-    <div class="nav-strip">
-      <div class="nav-strip-inner">
-        <span class="nav-strip-text">Korea Advanced Institute of Science and Technology</span>
-        <div class="nav-strip-right">
-          <a class="strip-pill" href="https://dsil.kaist.ac.kr/" target="_blank" rel="noopener">DSIL 홈페이지</a>
-        </div>
+  <div class="page">
+    <div class="kaist-strip d-print-none">
+      <div class="container-xl d-flex align-items-center justify-content-between">
+        <span class="kaist-strip-text">Korea Advanced Institute of Science and Technology</span>
+        <a href="https://dsil.kaist.ac.kr/" target="_blank" rel="noopener" class="ms-auto">DSIL 홈페이지 <i class="ti ti-external-link"></i></a>
       </div>
     </div>
-    <div class="nav-main">
-      <div class="nav-main-inner">
-        <a class="nav-brand" href="index.html">
-          <img src="assets/img/logo/KAIST_DSIL_Final.png" alt="DSIL" class="nav-logo-img nav-logo-lab">
-          <span class="nav-brand-tag">Lab Portal</span>
-        </a>
-        <div class="nav-right">
-          <div class="nav-links" id="nav-links">
-            <a class="nav-link is-active" href="index.html">Home</a>
-            <a class="nav-link" href="budget/index.html">예산 관리</a>
-            <a class="nav-link is-disabled" href="#" title="준비 중">장비 예약</a>
+
+    <header class="navbar navbar-expand-md d-print-none">
+      <div class="container-xl">
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="메뉴 열기">
+          <span class="navbar-toggler-icon"></span>
+        </button>
+        <div class="navbar-brand navbar-brand-autodark d-none-navbar-horizontal pe-0 pe-md-3">
+          <a href="index.html" class="d-flex align-items-center gap-2 text-decoration-none">
+            <img src="assets/img/logo/KAIST_DSIL_Final.png" alt="KAIST DSIL" class="navbar-brand-image">
+            <span class="badge badge-outline text-primary brand-tag">Lab Portal</span>
+          </a>
+        </div>
+        <div class="collapse navbar-collapse" id="navbar-menu">
+          <ul class="navbar-nav">
+            <li class="nav-item active">
+              <a class="nav-link" href="index.html"><span class="nav-link-icon"><i class="ti ti-home"></i></span><span class="nav-link-title">홈</span></a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link" href="budget/index.html"><span class="nav-link-icon"><i class="ti ti-wallet"></i></span><span class="nav-link-title">예산 관리</span></a>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link disabled" href="#" aria-disabled="true" title="준비 중"><span class="nav-link-icon"><i class="ti ti-calendar-event"></i></span><span class="nav-link-title">장비 예약</span></a>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </header>
+
+    <div class="page-wrapper">
+      <div class="page-header d-print-none">
+        <div class="container-xl">
+          <div class="row g-2 align-items-center">
+            <div class="col">
+              <div class="page-pretitle">KAIST · Device-to-System Integration Lab</div>
+              <h2 class="page-title">Lab Portal</h2>
+              <div class="text-secondary mt-1">연구실 운영에 필요한 도구를 한곳에 모았습니다. 구성원 누구나 브라우저에서 바로 씁니다.</div>
+            </div>
+            <div class="col-auto ms-auto d-print-none">
+              <a href="budget/index.html" class="btn btn-primary"><i class="ti ti-wallet me-1"></i>예산 관리 열기</a>
+            </div>
           </div>
-          <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false" onclick="toggleNav()">☰</button>
         </div>
       </div>
-    </div>
-  </nav>
 
-  <main class="container">
-    <section class="hero">
-      <div>
-        <h1>DSIL Lab Portal</h1>
-        <p>연구실 운영에 필요한 도구를 한곳에 모았습니다. 공개 홈페이지(dsil.kaist.ac.kr)와 같은 디자인으로, 구성원 누구나 브라우저에서 바로 씁니다.</p>
-        <a class="btn btn-primary" href="budget/index.html"><span class="material-icons">account_balance_wallet</span>예산 관리 열기</a>
-      </div>
-      <div class="hero-panel">
-        <dl>
-          <dt>연구실</dt><dd>Device-to-System Integration Lab (DSIL)</dd>
-          <dt>소속</dt><dd>KAIST School of Electrical Engineering</dd>
-          <dt>위치</dt><dd>E3-3 (Device Innovation Facility) Room 2302</dd>
-          <dt>운영</dt><dd>GitHub Pages 정적 사이트 + 선택형 공용 DB</dd>
-        </dl>
-      </div>
-    </section>
+      <div class="page-body">
+        <div class="container-xl">
+          <div class="row row-deck row-cards mb-3">
+            <div class="col-md-6 col-lg-4">
+              <a href="budget/index.html" class="card card-link card-link-pop tool-card">
+                <div class="card-body">
+                  <span class="avatar bg-blue-lt mb-3"><i class="ti ti-wallet"></i></span>
+                  <h3 class="card-title mb-1">과제별 예산 관리</h3>
+                  <p class="text-secondary mb-0">구매 요청을 올리면 관리자에게 한곳에 모이고, 과제와 비목을 배정하면 예산이 자동으로 차감됩니다. 신청자는 처리 여부를 바로 확인합니다.</p>
+                </div>
+                <div class="card-footer d-flex align-items-center justify-content-between">
+                  <span class="badge bg-blue-lt">운영 중</span>
+                  <span class="text-primary fw-medium">열기 <i class="ti ti-arrow-right"></i></span>
+                </div>
+              </a>
+            </div>
+            <div class="col-md-6 col-lg-4">
+              <div class="card tool-card card-soon">
+                <div class="card-body">
+                  <span class="avatar bg-secondary-lt mb-3"><i class="ti ti-calendar-event"></i></span>
+                  <h3 class="card-title mb-1">장비 예약</h3>
+                  <p class="text-secondary mb-0">프로브 스테이션, 증착 장비 등 공용 장비 예약 캘린더.</p>
+                </div>
+                <div class="card-footer"><span class="badge bg-secondary-lt">준비 중</span></div>
+              </div>
+            </div>
+            <div class="col-md-6 col-lg-4">
+              <div class="card tool-card card-soon">
+                <div class="card-body">
+                  <span class="avatar bg-secondary-lt mb-3"><i class="ti ti-packages"></i></span>
+                  <h3 class="card-title mb-1">소모품 재고</h3>
+                  <p class="text-secondary mb-0">웨이퍼, 전구체, 케미컬 재고와 발주 시점 관리.</p>
+                </div>
+                <div class="card-footer"><span class="badge bg-secondary-lt">준비 중</span></div>
+              </div>
+            </div>
+          </div>
 
-    <h2 class="section-title">도구</h2>
-    <div class="module-grid">
-      <a class="module-card" href="budget/index.html">
-        <span class="material-icons">account_balance_wallet</span>
-        <h3 class="module-card-title">과제별 예산 관리</h3>
-        <p class="module-card-summary">구매 요청을 올리면 관리자에게 한곳에 모이고, 과제를 배정하면 예산이 자동으로 차감됩니다. 신청자는 처리 여부를 바로 확인합니다.</p>
-        <span class="module-card-actions">열기 →</span>
-      </a>
-      <div class="module-card is-soon">
-        <span class="material-icons">event_available</span>
-        <h3 class="module-card-title">장비 예약</h3>
-        <p class="module-card-summary">프로브 스테이션, 증착 장비 등 공용 장비 예약 캘린더.</p>
-        <span class="module-card-actions">준비 중</span>
-      </div>
-      <div class="module-card is-soon">
-        <span class="material-icons">inventory_2</span>
-        <h3 class="module-card-title">소모품 재고</h3>
-        <p class="module-card-summary">웨이퍼, 전구체, 케미컬 재고와 발주 시점 관리.</p>
-        <span class="module-card-actions">준비 중</span>
-      </div>
-    </div>
-  </main>
-
-  <footer class="site-footer">
-    <div class="footer-inner">
-      <div class="footer-left">
-        <div class="footer-lab">
-          <span class="footer-univ">KAIST</span>
-          <span class="footer-sep">|</span>
-          <span class="footer-labname">Device-to-System Integration Lab (DSIL)</span>
+          <div class="row row-deck row-cards">
+            <div class="col-lg-7">
+              <div class="card">
+                <div class="card-header"><h3 class="card-title"><i class="ti ti-route me-1 text-primary"></i>예산 관리는 이렇게 씁니다</h3></div>
+                <div class="card-body">
+                  <div class="list-group list-group-flush">
+                    <div class="list-group-item px-0 d-flex gap-3">
+                      <span class="avatar avatar-sm bg-blue-lt flex-shrink-0">1</span>
+                      <div><div class="fw-medium">구매 요청 제출</div><div class="text-secondary small">품명, 비목(재료비·연구활동비·장비구매비), 수량, 단가를 적어 올립니다.</div></div>
+                    </div>
+                    <div class="list-group-item px-0 d-flex gap-3">
+                      <span class="avatar avatar-sm bg-blue-lt flex-shrink-0">2</span>
+                      <div><div class="fw-medium">관리자 배정</div><div class="text-secondary small">관리자가 PIN으로 관리자 화면을 열고, 미처리 요청에 과제와 비목을 배정합니다.</div></div>
+                    </div>
+                    <div class="list-group-item px-0 d-flex gap-3">
+                      <span class="avatar avatar-sm bg-blue-lt flex-shrink-0">3</span>
+                      <div><div class="fw-medium">예산 자동 차감·상태 확인</div><div class="text-secondary small">배정 금액은 해당 과제의 비목 잔액에서 빠지고, 신청자는 처리·반려 여부를 목록에서 봅니다.</div></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="col-lg-5">
+              <div class="card">
+                <div class="card-header"><h3 class="card-title"><i class="ti ti-building me-1 text-primary"></i>연구실</h3></div>
+                <div class="card-body">
+                  <div class="datagrid">
+                    <div class="datagrid-item"><div class="datagrid-title">연구실</div><div class="datagrid-content">Device-to-System Integration Lab (DSIL)</div></div>
+                    <div class="datagrid-item"><div class="datagrid-title">소속</div><div class="datagrid-content">KAIST School of Electrical Engineering</div></div>
+                    <div class="datagrid-item"><div class="datagrid-title">위치</div><div class="datagrid-content">E3-3 (Device Innovation Facility) Room 2302</div></div>
+                    <div class="datagrid-item"><div class="datagrid-title">데이터</div><div class="datagrid-content">로컬 저장 모드 기본 · 공용 DB(Supabase) 전환 가능</div></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="footer-address">Room 2302, Building E3-3 (Device Innovation Facility), KAIST, 291 Daehak-ro, Yuseong-gu, Daejeon 34141, Republic of Korea</div>
       </div>
-      <div class="footer-right">
-        <div class="footer-copy">&copy; 2026 Device-to-System Integration Lab (DSIL) · Lab Portal</div>
-      </div>
-    </div>
-  </footer>
 
-  <script src="assets/js/nav.js"></script>
+      <footer class="footer footer-transparent d-print-none">
+        <div class="container-xl">
+          <div class="row text-center align-items-center flex-row-reverse">
+            <div class="col-lg-auto ms-lg-auto">
+              <ul class="list-inline list-inline-dots mb-0">
+                <li class="list-inline-item"><a href="https://github.com/mhparkunist-del/dsil-portal" target="_blank" rel="noopener" class="link-secondary">소스 코드</a></li>
+                <li class="list-inline-item"><a href="https://tabler.io/" target="_blank" rel="noopener" class="link-secondary">Tabler UI</a></li>
+              </ul>
+            </div>
+            <div class="col-12 col-lg-auto mt-3 mt-lg-0">
+              <ul class="list-inline list-inline-dots mb-0">
+                <li class="list-inline-item">&copy; 2026 Device-to-System Integration Lab (DSIL), KAIST</li>
+                <li class="list-inline-item text-secondary">E3-3 Room 2302</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </footer>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@tabler/core@1.5.0/dist/js/tabler.min.js" defer></script>
 </body>
 </html>
