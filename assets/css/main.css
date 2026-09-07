@@ -717,6 +717,32 @@ table.data tr.is-over td { background: var(--rejected-bg); }
 .toast.is-visible { opacity: 1; transform: translateX(-50%) translateY(0); }
 .toast.is-error { background: var(--accent); }
 
+/* Modal (replaces window.prompt / confirm) */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(12, 47, 95, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 3000;
+}
+.modal {
+  background: #fff;
+  border-radius: var(--radius);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+  padding: 20px 22px;
+  width: min(440px, 100%);
+}
+.modal-title { margin: 0 0 6px; font-size: 1.05rem; }
+.modal-msg { margin: 0 0 12px; color: var(--muted); font-size: 0.9rem; }
+.modal-input { margin-bottom: 4px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .toast, .progress-bar, .module-card { transition: none; }
+}
+
 .muted { color: var(--muted); }
 .small { font-size: 0.8rem; }
 .nowrap { white-space: nowrap; }

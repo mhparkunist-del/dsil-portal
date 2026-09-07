@@ -54,6 +54,40 @@
     toastTimer = setTimeout(function () { el.classList.remove('is-visible'); }, 2600);
   }
 
+  /* 소형 모달 – window.prompt/confirm 대체 (샌드박스 iframe 에서도 동작, 키보드 접근 가능) */
+  function dialog(opts) {
+    return new Promise(function (resolve) {
+      var wrap = document.createElement('div');
+      wrap.className = 'modal-backdrop';
+      var inputHtml = '';
+      if (opts.input === 'textarea') inputHtml = '<textarea class="modal-input" rows="3" placeholder="' + esc(opts.placeholder || '') + '"></textarea>';
+      else if (opts.input) inputHtml = '<input class="modal-input" type="' + (opts.input === 'password' ? 'password' : 'text') + '" placeholder="' + esc(opts.placeholder || '') + '" autocomplete="off">';
+      wrap.innerHTML = '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">'
+        + '<h3 class="modal-title" id="modal-title">' + esc(opts.title || '') + '</h3>'
+        + (opts.message ? '<p class="modal-msg">' + esc(opts.message) + '</p>' : '')
+        + inputHtml
+        + '<div class="form-actions"><button type="button" class="btn" data-modal="cancel">취소</button>'
+        + '<button type="button" class="btn ' + (opts.danger ? 'btn-danger' : 'btn-primary') + '" data-modal="ok">' + esc(opts.okLabel || '확인') + '</button></div></div>';
+      document.body.appendChild(wrap);
+      var input = wrap.querySelector('.modal-input');
+      (input || wrap.querySelector('[data-modal="ok"]')).focus();
+      function close(val) { document.removeEventListener('keydown', onKey); wrap.remove(); resolve(val); }
+      function ok() { close(input ? input.value : true); }
+      function onKey(e) {
+        if (e.key === 'Escape') close(null);
+        if (e.key === 'Enter' && input && input.tagName !== 'TEXTAREA') { e.preventDefault(); ok(); }
+      }
+      document.addEventListener('keydown', onKey);
+      wrap.addEventListener('click', function (e) {
+        var b = e.target.closest('[data-modal]');
+        if (b) { if (b.getAttribute('data-modal') === 'ok') ok(); else close(null); return; }
+        if (e.target === wrap) close(null);
+      });
+    });
+  }
+  function confirmDlg(opts) { return dialog(opts).then(function (v) { return v === true; }); }
+  function promptDlg(opts) { return dialog(opts); }
+
   function projectById(id) {
     for (var i = 0; i < state.projects.length; i++) if (state.projects[i].id === id) return state.projects[i];
     return null;
@@ -138,7 +172,7 @@
     else if (state.tab === 'admin') html += renderAdminTab();
 
     app.innerHTML = html;
-    if (window.history && history.replaceState) history.replaceState(null, '', '#' + state.tab);
+    try { history.replaceState(null, '', '#' + state.tab); } catch (e) { /* 샌드박스 뷰어에서는 막힐 수 있음 */ }
   }
 
   function tile(label, value, sub, cls) {
@@ -474,12 +508,15 @@
         refresh().then(function () { toast('새로고침 완료'); }); break;
       case 'signout':
         store.signOut().then(function () { state.magicLinkSent = false; return refresh(); }); break;
-      case 'become-admin': {
-        var pin = window.prompt('관리자 PIN을 입력하세요');
-        if (pin === null) return;
-        store.becomeAdmin(pin).then(function (ok) { if (ok) { toast('관리자 모드로 전환했습니다.'); state.tab = 'admin'; return refresh(); } toast('PIN이 올바르지 않습니다.', true); });
+      case 'become-admin':
+        promptDlg({ title: '관리자 전환', message: '관리자 PIN을 입력하세요.', input: 'password', placeholder: 'PIN', okLabel: '전환' }).then(function (pin) {
+          if (pin === null) return;
+          return store.becomeAdmin(pin).then(function (ok) {
+            if (ok) { toast('관리자 모드로 전환했습니다.'); state.tab = 'admin'; return refresh(); }
+            toast('PIN이 올바르지 않습니다.', true);
+          });
+        }).catch(handleError);
         break;
-      }
       case 'assign': {
         var sel = row.querySelector('select[data-role="assign-project"]');
         var pid = sel && sel.value;
@@ -487,27 +524,33 @@
         var req = state.requests.filter(function (r) { return r.id === id; })[0];
         var proj = projectById(pid);
         var stats = projectStats(proj);
-        if ((Number(req.amount) || 0) > stats.remain) {
-          if (!window.confirm('이 과제 잔액(' + won(stats.remain) + ')보다 큰 금액입니다. 그래도 배정할까요?')) return;
-        }
-        store.updateRequest(id, { status: 'done', projectId: pid, processedAt: new Date().toISOString(), processedBy: state.session.user.name, adminNote: '' })
-          .then(function () { toast('처리 완료: ' + proj.name); return refresh(); }).catch(handleError);
+        var over = (Number(req.amount) || 0) > stats.remain;
+        var ask = over
+          ? confirmDlg({ title: '예산 초과', message: '이 과제 잔액은 ' + won(stats.remain) + '이고 요청 금액은 ' + won(req.amount) + '입니다. 그래도 배정할까요?', okLabel: '초과 배정', danger: true })
+          : Promise.resolve(true);
+        ask.then(function (ok) {
+          if (!ok) return;
+          return store.updateRequest(id, { status: 'done', projectId: pid, processedAt: new Date().toISOString(), processedBy: state.session.user.name, adminNote: '' })
+            .then(function () { toast('처리 완료: ' + proj.name); return refresh(); });
+        }).catch(handleError);
         break;
       }
-      case 'reject': {
-        var reason = window.prompt('반려 사유를 입력하세요 (신청자에게 표시됩니다)');
-        if (reason === null) return;
-        store.updateRequest(id, { status: 'rejected', projectId: null, processedAt: new Date().toISOString(), processedBy: state.session.user.name, adminNote: reason.trim() })
-          .then(function () { toast('반려했습니다.'); return refresh(); }).catch(handleError);
+      case 'reject':
+        promptDlg({ title: '반려', message: '반려 사유를 적어 주세요. 신청자에게 표시됩니다.', input: 'textarea', placeholder: '예: 개인 장비는 과제 예산 집행 불가', okLabel: '반려', danger: true }).then(function (reason) {
+          if (reason === null) return;
+          return store.updateRequest(id, { status: 'rejected', projectId: null, processedAt: new Date().toISOString(), processedBy: state.session.user.name, adminNote: reason.trim() })
+            .then(function () { toast('반려했습니다.'); return refresh(); });
+        }).catch(handleError);
         break;
-      }
       case 'reopen':
         store.updateRequest(id, { status: 'pending', projectId: null, processedAt: null, processedBy: null, adminNote: '' })
           .then(function () { toast('미처리로 되돌렸습니다.'); return refresh(); }).catch(handleError);
         break;
       case 'delete-request':
-        if (!window.confirm('이 요청을 삭제할까요? 되돌릴 수 없습니다.')) return;
-        store.deleteRequest(id).then(function () { toast('삭제했습니다.'); return refresh(); }).catch(handleError);
+        confirmDlg({ title: '요청 삭제', message: '이 요청을 삭제할까요? 되돌릴 수 없습니다.', okLabel: '삭제', danger: true }).then(function (ok) {
+          if (!ok) return;
+          return store.deleteRequest(id).then(function () { toast('삭제했습니다.'); return refresh(); });
+        }).catch(handleError);
         break;
       case 'edit-project':
         state.editingProjectId = id; render();
@@ -516,15 +559,19 @@
       case 'cancel-edit':
         state.editingProjectId = null; render(); break;
       case 'delete-project':
-        if (!window.confirm('이 과제를 삭제할까요?')) return;
-        store.deleteProject(id).then(function () { toast('과제를 삭제했습니다.'); return refresh(); }).catch(handleError);
+        confirmDlg({ title: '과제 삭제', message: '이 과제를 삭제할까요? 배정된 구매건이 있는 과제는 삭제되지 않습니다.', okLabel: '삭제', danger: true }).then(function (ok) {
+          if (!ok) return;
+          return store.deleteProject(id).then(function () { toast('과제를 삭제했습니다.'); return refresh(); });
+        }).catch(handleError);
         break;
       case 'export':
         download('dsil-budget-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(store.exportJSON(), null, 2));
         break;
       case 'reset-demo':
-        if (!window.confirm('모든 데이터를 지우고 예시 데이터로 되돌릴까요?')) return;
-        store.resetDemo(); toast('예시 데이터로 초기화했습니다.'); refresh();
+        confirmDlg({ title: '예시 데이터로 초기화', message: '모든 데이터를 지우고 예시 데이터로 되돌릴까요?', okLabel: '초기화', danger: true }).then(function (ok) {
+          if (!ok) return;
+          store.resetDemo(); toast('예시 데이터로 초기화했습니다.'); return refresh();
+        }).catch(handleError);
         break;
     }
   });
