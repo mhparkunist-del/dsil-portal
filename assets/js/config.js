@@ -26,6 +26,17 @@ window.DSIL_CONFIG = {
     { id: 'other',     label: '기타' }
   ],
 
+  /* 구매 절차 기준 (KAIST). 금액이 upTo 이하이면 해당 단계, null 은 상한 없음. 위에서부터 차례로 판정. */
+  procurementTiers: [
+    { upTo: 5000000,  label: '자체 검수',   cls: 'bg-green-lt',  desc: '500만원 이하 · 중앙검수 불필요' },
+    { upTo: 9999999,  label: '중앙검수',    cls: 'bg-yellow-lt', desc: '500만원 초과 · 중앙검수 필요' },
+    { upTo: 19999999, label: '구매팀 구매', cls: 'bg-orange-lt', desc: '1,000만원 이상 · 구매팀 경유' },
+    { upTo: null,     label: '구매팀 입찰', cls: 'bg-red-lt',    desc: '2,000만원 이상 · 구매팀 입찰' }
+  ],
+
+  /* 구매 심의 열람 PIN 형식 (숫자 4~8자리) */
+  reviewPinPattern: '\\d{4,8}',
+
   /* local 모드 첫 실행 시 예시 과제·요청을 채워 넣을지 여부 */
   seedDemoData: true,
 
