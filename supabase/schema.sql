@@ -309,5 +309,587 @@ begin
   end if;
 end $$;
 
+-- =====================================================================
+-- 장비 예약
+--   equipment(관리자 관리) · equipment_users(담당자가 PIN 과 함께 등록) · reservations · usage_logs
+--   구성원은 예산·PIN 이 빠진 뷰만 읽고, 쓰기는 모두 검증 함수(RPC)를 통합니다.
+-- =====================================================================
+create or replace function public.name_key(t text)
+returns text language sql immutable as $$ select lower(regexp_replace(coalesce(t, ''), '\s', '', 'g')); $$;
+
+create or replace function public.log_due_interval()
+returns interval language sql immutable as $$ select interval '7 days'; $$;   -- config.js equipment.logDueDays 와 맞추세요
+
+create table if not exists public.equipment (
+  id                uuid primary key default gen_random_uuid(),
+  created_at        timestamptz not null default now(),
+  name              text not null,
+  location          text not null default '',
+  manager_name      text not null default '',
+  manager_pin_hash  text not null default '',
+  description       text not null default '',
+  rules             text not null default '',
+  color             text not null default '#004191',
+  active            boolean not null default true
+);
+
+create table if not exists public.equipment_users (
+  id            uuid primary key default gen_random_uuid(),
+  equipment_id  uuid not null references public.equipment (id) on delete cascade,
+  name          text not null,
+  name_key      text not null,
+  pin_hash      text not null,
+  granted_at    timestamptz not null default now(),
+  granted_by    text not null default '',
+  unique (equipment_id, name_key)
+);
+
+create table if not exists public.reservations (
+  id            uuid primary key default gen_random_uuid(),
+  created_at    timestamptz not null default now(),
+  equipment_id  uuid not null references public.equipment (id) on delete restrict,
+  user_id       uuid references auth.users (id),
+  user_name     text not null default '',
+  user_key      text not null default '',
+  start_at      timestamptz not null,
+  end_at        timestamptz not null,
+  purpose       text not null default '',
+  status        text not null default 'booked' check (status in ('booked', 'cancelled')),
+  log_id        uuid,
+  cancelled_at  timestamptz,
+  cancelled_by  text,
+  check (end_at > start_at)
+);
+create index if not exists reservations_equipment_time_idx on public.reservations (equipment_id, start_at);
+create index if not exists reservations_user_idx on public.reservations (user_id, user_key);
+
+create table if not exists public.usage_logs (
+  id              uuid primary key default gen_random_uuid(),
+  created_at      timestamptz not null default now(),
+  reservation_id  uuid not null references public.reservations (id) on delete cascade,
+  equipment_id    uuid not null references public.equipment (id) on delete cascade,
+  user_id         uuid references auth.users (id),
+  user_name       text not null default '',
+  used_start      timestamptz,
+  used_end        timestamptz,
+  condition       text not null default 'normal' check (condition in ('normal', 'issue')),
+  content         text not null default '',
+  issues          text not null default '',
+  waived          boolean not null default false,
+  waived_by       text
+);
+
+drop view if exists public.equipment_public;
+create view public.equipment_public as
+select id, created_at, name, location, manager_name, description, rules, color, active from public.equipment;
+alter view public.equipment_public set (security_invoker = false);
+grant select on public.equipment_public to authenticated;
+
+drop view if exists public.equipment_users_public;
+create view public.equipment_users_public as
+select id, equipment_id, name, granted_at, granted_by from public.equipment_users;
+alter view public.equipment_users_public set (security_invoker = false);
+grant select on public.equipment_users_public to authenticated;
+
+create or replace function public.verify_equipment_manager(p_equipment_id uuid, p_pin text)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.equipment e where e.id = p_equipment_id and e.manager_pin_hash <> '' and e.manager_pin_hash = encode(digest(coalesce(p_pin, ''), 'sha256'), 'hex'));
+$$;
+
+create or replace function public.grant_equipment_user(p_equipment_id uuid, p_manager_pin text, p_name text, p_user_pin text)
+returns setof public.equipment_users_public language plpgsql security definer set search_path = public as $$
+declare v_id uuid; v_by text;
+begin
+  if not public.verify_equipment_manager(p_equipment_id, p_manager_pin) then raise exception '장비 담당자 PIN이 올바르지 않습니다.'; end if;
+  if coalesce(trim(p_name), '') = '' then raise exception '이름을 입력하세요.'; end if;
+  select name into v_by from public.profiles where id = auth.uid();
+  insert into public.equipment_users (equipment_id, name, name_key, pin_hash, granted_by)
+  values (p_equipment_id, trim(p_name), public.name_key(p_name), encode(digest(coalesce(p_user_pin, ''), 'sha256'), 'hex'), coalesce(v_by, ''))
+  on conflict (equipment_id, name_key) do update
+    set name = excluded.name, pin_hash = excluded.pin_hash, granted_at = now(), granted_by = excluded.granted_by
+  returning id into v_id;
+  return query select * from public.equipment_users_public where id = v_id;
+end;
+$$;
+
+create or replace function public.revoke_equipment_user(p_equipment_id uuid, p_manager_pin text, p_user_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.verify_equipment_manager(p_equipment_id, p_manager_pin) then raise exception '장비 담당자 PIN이 올바르지 않습니다.'; end if;
+  delete from public.equipment_users where id = p_user_id and equipment_id = p_equipment_id;
+end;
+$$;
+
+create or replace function public.create_reservation(p_equipment_id uuid, p_user_pin text, p_start timestamptz, p_end timestamptz, p_purpose text)
+returns setof public.reservations language plpgsql security definer set search_path = public as $$
+declare v_name text; v_key text; v_eq public.equipment%rowtype; v_clash public.reservations%rowtype; v_id uuid;
+begin
+  select name into v_name from public.profiles where id = auth.uid();
+  v_key := public.name_key(v_name);
+  select * into v_eq from public.equipment where id = p_equipment_id and active;
+  if not found then raise exception '예약할 수 없는 장비입니다.'; end if;
+  if not exists (select 1 from public.equipment_users u where u.equipment_id = p_equipment_id and u.name_key = v_key
+                 and u.pin_hash = encode(digest(coalesce(p_user_pin, ''), 'sha256'), 'hex')) then
+    raise exception '이 장비의 사용 권한이 없거나 사용자 PIN이 올바르지 않습니다. 담당자(%)에게 문의하세요.', v_eq.manager_name;
+  end if;
+  if p_end <= p_start then raise exception '시작·종료 시각을 확인하세요.'; end if;
+  if p_end <= now() then raise exception '이미 지난 시간은 예약할 수 없습니다.'; end if;
+  if p_end - p_start > interval '8 hours' then raise exception '1회 예약은 최대 8시간입니다.'; end if;
+  if exists (select 1 from public.reservations r where r.status = 'booked' and r.log_id is null
+             and (r.user_id = auth.uid() or r.user_key = v_key) and r.end_at < now() - public.log_due_interval()) then
+    raise exception '사용 로그를 기한 내 작성하지 않은 예약이 있어 새 예약을 할 수 없습니다. 로그를 먼저 작성하세요.';
+  end if;
+  select * into v_clash from public.reservations r where r.equipment_id = p_equipment_id and r.status = 'booked' and r.start_at < p_end and r.end_at > p_start limit 1;
+  if found then raise exception '같은 시간에 %님의 예약이 있습니다.', v_clash.user_name; end if;
+  insert into public.reservations (equipment_id, user_id, user_name, user_key, start_at, end_at, purpose)
+  values (p_equipment_id, auth.uid(), coalesce(v_name, ''), v_key, p_start, p_end, coalesce(p_purpose, ''))
+  returning id into v_id;
+  return query select * from public.reservations where id = v_id;
+end;
+$$;
+
+create or replace function public.cancel_reservation(p_reservation_id uuid, p_manager_pin text default null)
+returns setof public.reservations language plpgsql security definer set search_path = public as $$
+declare v_r public.reservations%rowtype; v_name text; v_key text;
+begin
+  select * into v_r from public.reservations where id = p_reservation_id;
+  if not found then raise exception '예약을 찾을 수 없습니다.'; end if;
+  if v_r.status <> 'booked' then raise exception '이미 취소된 예약입니다.'; end if;
+  select name into v_name from public.profiles where id = auth.uid();
+  v_key := public.name_key(v_name);
+  if ((v_r.user_id = auth.uid() or v_r.user_key = v_key) and v_r.start_at > now())
+     or (p_manager_pin is not null and public.verify_equipment_manager(v_r.equipment_id, p_manager_pin)) then
+    update public.reservations set status = 'cancelled', cancelled_at = now(), cancelled_by = coalesce(v_name, '') where id = p_reservation_id;
+  else
+    raise exception '본인의 예정된 예약만 취소할 수 있습니다. 지난 예약은 장비 담당자가 처리합니다.';
+  end if;
+  return query select * from public.reservations where id = p_reservation_id;
+end;
+$$;
+
+create or replace function public.create_usage_log(p_reservation_id uuid, p_used_start timestamptz, p_used_end timestamptz, p_condition text, p_content text, p_issues text)
+returns setof public.usage_logs language plpgsql security definer set search_path = public as $$
+declare v_r public.reservations%rowtype; v_name text; v_id uuid;
+begin
+  select * into v_r from public.reservations where id = p_reservation_id;
+  if not found or v_r.status <> 'booked' then raise exception '로그를 쓸 예약을 찾을 수 없습니다.'; end if;
+  if v_r.log_id is not null then raise exception '이미 로그가 작성된 예약입니다.'; end if;
+  select name into v_name from public.profiles where id = auth.uid();
+  if not (v_r.user_id = auth.uid() or v_r.user_key = public.name_key(v_name)) then raise exception '본인 예약의 로그만 작성할 수 있습니다.'; end if;
+  insert into public.usage_logs (reservation_id, equipment_id, user_id, user_name, used_start, used_end, condition, content, issues)
+  values (p_reservation_id, v_r.equipment_id, auth.uid(), coalesce(v_name, ''), coalesce(p_used_start, v_r.start_at), coalesce(p_used_end, v_r.end_at),
+          case when p_condition = 'issue' then 'issue' else 'normal' end, coalesce(p_content, ''), coalesce(p_issues, ''))
+  returning id into v_id;
+  update public.reservations set log_id = v_id where id = p_reservation_id;
+  return query select * from public.usage_logs where id = v_id;
+end;
+$$;
+
+create or replace function public.waive_usage_log(p_reservation_id uuid, p_manager_pin text, p_note text)
+returns setof public.usage_logs language plpgsql security definer set search_path = public as $$
+declare v_r public.reservations%rowtype; v_name text; v_id uuid;
+begin
+  select * into v_r from public.reservations where id = p_reservation_id;
+  if not found or v_r.status <> 'booked' then raise exception '예약을 찾을 수 없습니다.'; end if;
+  if v_r.log_id is not null then raise exception '이미 로그가 있는 예약입니다.'; end if;
+  if not public.verify_equipment_manager(v_r.equipment_id, p_manager_pin) then raise exception '장비 담당자 PIN이 올바르지 않습니다.'; end if;
+  select name into v_name from public.profiles where id = auth.uid();
+  insert into public.usage_logs (reservation_id, equipment_id, user_id, user_name, used_start, used_end, condition, content, waived, waived_by)
+  values (p_reservation_id, v_r.equipment_id, v_r.user_id, v_r.user_name, v_r.start_at, v_r.end_at, 'normal', coalesce(p_note, ''), true, coalesce(v_name, ''))
+  returning id into v_id;
+  update public.reservations set log_id = v_id where id = p_reservation_id;
+  return query select * from public.usage_logs where id = v_id;
+end;
+$$;
+
+revoke all on function public.verify_equipment_manager(uuid, text) from public;
+revoke all on function public.grant_equipment_user(uuid, text, text, text) from public;
+revoke all on function public.revoke_equipment_user(uuid, text, uuid) from public;
+revoke all on function public.create_reservation(uuid, text, timestamptz, timestamptz, text) from public;
+revoke all on function public.cancel_reservation(uuid, text) from public;
+revoke all on function public.create_usage_log(uuid, timestamptz, timestamptz, text, text, text) from public;
+revoke all on function public.waive_usage_log(uuid, text, text) from public;
+grant execute on function public.verify_equipment_manager(uuid, text) to authenticated;
+grant execute on function public.grant_equipment_user(uuid, text, text, text) to authenticated;
+grant execute on function public.revoke_equipment_user(uuid, text, uuid) to authenticated;
+grant execute on function public.create_reservation(uuid, text, timestamptz, timestamptz, text) to authenticated;
+grant execute on function public.cancel_reservation(uuid, text) to authenticated;
+grant execute on function public.create_usage_log(uuid, timestamptz, timestamptz, text, text, text) to authenticated;
+grant execute on function public.waive_usage_log(uuid, text, text) to authenticated;
+
+alter table public.equipment       enable row level security;
+alter table public.equipment_users enable row level security;
+alter table public.reservations    enable row level security;
+alter table public.usage_logs      enable row level security;
+
+drop policy if exists "equipment: admin all"        on public.equipment;
+drop policy if exists "equipment_users: admin all"  on public.equipment_users;
+drop policy if exists "reservations: read all"      on public.reservations;
+drop policy if exists "reservations: admin all"     on public.reservations;
+drop policy if exists "usage_logs: read all"        on public.usage_logs;
+drop policy if exists "usage_logs: admin all"       on public.usage_logs;
+create policy "equipment: admin all"       on public.equipment       for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "equipment_users: admin all" on public.equipment_users for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "reservations: read all"     on public.reservations    for select to authenticated using (true);
+create policy "reservations: admin all"    on public.reservations    for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "usage_logs: read all"       on public.usage_logs      for select to authenticated using (true);
+create policy "usage_logs: admin all"      on public.usage_logs      for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+
+do $$
+begin
+  if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and tablename = 'reservations') then
+    alter publication supabase_realtime add table public.reservations;
+  end if;
+end $$;
+
+-- =====================================================================
+-- 출석 시트
+--   구성원은 auth 계정 + 출석 PIN(해시)으로 확인. 출석 체크·휴가 신청은 서버 함수가 규칙을 강제합니다.
+--   시간 판정은 Asia/Seoul 기준. 규칙 값은 attendance_settings 에서 바꿉니다.
+-- =====================================================================
+create table if not exists public.attendance_settings (key text primary key, value text not null);
+insert into public.attendance_settings (key, value) values ('late_after', '09:00'), ('close_after', '11:00'), ('vacation_per_half', '2'), ('self_register', 'true')
+on conflict (key) do nothing;
+create or replace function public.att_setting(p_key text) returns text language sql stable security definer set search_path = public as $$
+  select value from public.attendance_settings where key = p_key;
+$$;
+
+create table if not exists public.attendance_members (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid references auth.users (id),
+  name        text not null,
+  name_key    text not null unique,
+  pin_hash    text not null,
+  active      boolean not null default true,
+  created_at  timestamptz not null default now()
+);
+create table if not exists public.attendance_records (
+  id           uuid primary key default gen_random_uuid(),
+  member_id    uuid not null references public.attendance_members (id) on delete cascade,
+  name         text not null default '',
+  date         date not null,
+  status       text not null check (status in ('present', 'late', 'excused')),
+  check_in_at  timestamptz not null default now(),
+  reason       text not null default '',
+  created_at   timestamptz not null default now(),
+  edited_by    text,
+  unique (member_id, date)
+);
+create table if not exists public.attendance_leaves (
+  id          uuid primary key default gen_random_uuid(),
+  member_id   uuid not null references public.attendance_members (id) on delete cascade,
+  name        text not null default '',
+  type        text not null check (type in ('vacation', 'trip')),
+  start_date  date not null,
+  end_date    date not null,
+  days        integer not null default 0,
+  reason      text not null default '',
+  created_at  timestamptz not null default now(),
+  check (end_date >= start_date)
+);
+create table if not exists public.attendance_holidays (date date primary key, label text not null default '');
+
+drop view if exists public.attendance_members_public;
+create view public.attendance_members_public as select id, name, active, created_at from public.attendance_members;
+alter view public.attendance_members_public set (security_invoker = false);
+grant select on public.attendance_members_public to authenticated;
+
+create or replace function public.att_is_workday(p_date date) returns boolean language sql stable security definer set search_path = public as $$
+  select extract(isodow from p_date) < 6 and not exists (select 1 from public.attendance_holidays h where h.date = p_date);
+$$;
+
+create or replace function public.att_login(p_name text, p_pin text)
+returns setof public.attendance_members_public language plpgsql security definer set search_path = public as $$
+declare v_key text; v_m public.attendance_members%rowtype; v_hash text;
+begin
+  if coalesce(trim(p_name), '') = '' then raise exception '아이디(이름)를 입력하세요.'; end if;
+  if p_pin !~ '^\d{4,8}$' then raise exception 'PIN은 숫자 4~8자리입니다.'; end if;
+  v_key := public.name_key(p_name);
+  v_hash := encode(digest(p_pin, 'sha256'), 'hex');
+  select * into v_m from public.attendance_members where name_key = v_key;
+  if not found then
+    if public.att_setting('self_register') <> 'true' then raise exception '등록되지 않은 아이디입니다. 관리자에게 등록을 요청하세요.'; end if;
+    insert into public.attendance_members (user_id, name, name_key, pin_hash) values (auth.uid(), trim(p_name), v_key, v_hash) returning * into v_m;
+  else
+    if not v_m.active then raise exception '사용이 중지된 아이디입니다.'; end if;
+    if v_m.pin_hash <> v_hash then raise exception 'PIN이 올바르지 않습니다.'; end if;
+    if v_m.user_id is null then update public.attendance_members set user_id = auth.uid() where id = v_m.id; end if;
+  end if;
+  return query select * from public.attendance_members_public where id = v_m.id;
+end;
+$$;
+
+create or replace function public.att_member_for(p_pin text) returns public.attendance_members language plpgsql stable security definer set search_path = public as $$
+declare v_m public.attendance_members%rowtype;
+begin
+  select * into v_m from public.attendance_members where user_id = auth.uid() and pin_hash = encode(digest(coalesce(p_pin, ''), 'sha256'), 'hex') and active;
+  if not found then raise exception '출석 로그인이 필요합니다.'; end if;
+  return v_m;
+end;
+$$;
+
+create or replace function public.att_change_pin(p_old text, p_new text) returns void language plpgsql security definer set search_path = public as $$
+declare v_m public.attendance_members%rowtype;
+begin
+  v_m := public.att_member_for(p_old);
+  if p_new !~ '^\d{4,8}$' then raise exception '새 PIN은 숫자 4~8자리입니다.'; end if;
+  update public.attendance_members set pin_hash = encode(digest(p_new, 'sha256'), 'hex') where id = v_m.id;
+end;
+$$;
+
+create or replace function public.att_check_in(p_pin text, p_reason text)
+returns setof public.attendance_records language plpgsql security definer set search_path = public as $$
+declare v_m public.attendance_members%rowtype; v_now timestamptz := now(); v_local timestamp; v_today date; v_hm text; v_status text; v_id uuid; v_leave record;
+begin
+  v_m := public.att_member_for(p_pin);
+  v_local := timezone('Asia/Seoul', v_now); v_today := v_local::date; v_hm := to_char(v_local, 'HH24:MI');
+  if extract(isodow from v_today) >= 6 then raise exception '주말에는 출석 체크가 없습니다.'; end if;
+  if exists (select 1 from public.attendance_holidays h where h.date = v_today) then raise exception '공휴일에는 출석 체크가 없습니다.'; end if;
+  select * into v_leave from public.attendance_leaves l where l.member_id = v_m.id and l.start_date <= v_today and v_today <= l.end_date limit 1;
+  if found then raise exception '오늘은 %으로 등록되어 있어 출석 체크를 하지 않습니다.', case when v_leave.type = 'trip' then '출장' else '휴가' end; end if;
+  if exists (select 1 from public.attendance_records r where r.member_id = v_m.id and r.date = v_today) then raise exception '오늘은 이미 출석 체크를 했습니다.'; end if;
+  if v_hm >= public.att_setting('close_after') then raise exception '% 이후에는 출석 체크를 할 수 없습니다. 오늘은 미기입(결근)으로 처리됩니다.', public.att_setting('close_after'); end if;
+  v_status := case when v_hm < public.att_setting('late_after') then 'present' when coalesce(trim(p_reason), '') <> '' then 'excused' else 'late' end;
+  insert into public.attendance_records (member_id, name, date, status, check_in_at, reason)
+  values (v_m.id, v_m.name, v_today, v_status, v_now, case when v_status = 'present' then '' else coalesce(trim(p_reason), '') end) returning id into v_id;
+  return query select * from public.attendance_records where id = v_id;
+end;
+$$;
+
+create or replace function public.att_workdays(p_from date, p_to date) returns integer language sql stable security definer set search_path = public as $$
+  select count(*)::int from generate_series(p_from, p_to, interval '1 day') d where public.att_is_workday(d::date);
+$$;
+
+create or replace function public.att_request_leave(p_pin text, p_type text, p_start date, p_end date, p_reason text)
+returns setof public.attendance_leaves language plpgsql security definer set search_path = public as $$
+declare v_m public.attendance_members%rowtype; v_days int; v_id uuid; v_half record; v_limit int; v_used int;
+begin
+  v_m := public.att_member_for(p_pin);
+  if p_type not in ('vacation', 'trip') then raise exception '종류를 확인하세요.'; end if;
+  if p_end < p_start then raise exception '날짜를 확인하세요.'; end if;
+  if p_type = 'trip' and coalesce(trim(p_reason), '') = '' then raise exception '출장 사유를 입력하세요.'; end if;
+  v_days := public.att_workdays(p_start, p_end);
+  if v_days <= 0 then raise exception '선택한 기간에 근무일이 없습니다.'; end if;
+  if exists (select 1 from public.attendance_leaves l where l.member_id = v_m.id and l.start_date <= p_end and p_start <= l.end_date) then raise exception '이미 같은 기간에 휴가·출장이 등록되어 있습니다.'; end if;
+  if exists (select 1 from public.attendance_records r where r.member_id = v_m.id and r.date between p_start and p_end) then raise exception '해당 기간에 이미 출석 기록이 있습니다.'; end if;
+  if p_type = 'vacation' then
+    v_limit := coalesce(public.att_setting('vacation_per_half')::int, 2);
+    for v_half in
+      select extract(year from d)::int as y, case when extract(month from d) <= 6 then 1 else 2 end as h, count(*)::int as n
+      from generate_series(p_start, p_end, interval '1 day') d where public.att_is_workday(d::date) group by 1, 2
+    loop
+      select coalesce(sum(public.att_workdays(greatest(l.start_date, make_date(v_half.y, case when v_half.h = 1 then 1 else 7 end, 1)),
+                                              least(l.end_date, make_date(v_half.y, case when v_half.h = 1 then 6 else 12 end, case when v_half.h = 1 then 30 else 31 end)))), 0)
+      into v_used from public.attendance_leaves l
+      where l.member_id = v_m.id and l.type = 'vacation'
+        and l.end_date >= make_date(v_half.y, case when v_half.h = 1 then 1 else 7 end, 1)
+        and l.start_date <= make_date(v_half.y, case when v_half.h = 1 then 6 else 12 end, case when v_half.h = 1 then 30 else 31 end);
+      if v_used + v_half.n > v_limit then raise exception '%년 % 휴가는 %일까지입니다. (사용 %일, 신청 %일)', v_half.y, case when v_half.h = 1 then '상반기' else '하반기' end, v_limit, v_used, v_half.n; end if;
+    end loop;
+  end if;
+  insert into public.attendance_leaves (member_id, name, type, start_date, end_date, days, reason)
+  values (v_m.id, v_m.name, p_type, p_start, p_end, v_days, coalesce(trim(p_reason), '')) returning id into v_id;
+  return query select * from public.attendance_leaves where id = v_id;
+end;
+$$;
+
+create or replace function public.att_delete_leave(p_pin text, p_id uuid) returns void language plpgsql security definer set search_path = public as $$
+declare v_m public.attendance_members%rowtype;
+begin
+  v_m := public.att_member_for(p_pin);
+  delete from public.attendance_leaves where id = p_id and member_id = v_m.id and start_date >= (timezone('Asia/Seoul', now()))::date;
+  if not found then raise exception '본인의 시작 전 신청만 취소할 수 있습니다.'; end if;
+end;
+$$;
+
+create or replace function public.att_set_holidays(p_holidays jsonb) returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.is_admin() then raise exception '관리자만 공휴일을 바꿀 수 있습니다.'; end if;
+  delete from public.attendance_holidays;
+  insert into public.attendance_holidays (date, label) select (x->>'date')::date, coalesce(x->>'label', '') from jsonb_array_elements(coalesce(p_holidays, '[]'::jsonb)) x;
+end;
+$$;
+
+revoke all on function public.att_login(text, text) from public;
+revoke all on function public.att_change_pin(text, text) from public;
+revoke all on function public.att_check_in(text, text) from public;
+revoke all on function public.att_request_leave(text, text, date, date, text) from public;
+revoke all on function public.att_delete_leave(text, uuid) from public;
+revoke all on function public.att_set_holidays(jsonb) from public;
+grant execute on function public.att_login(text, text) to authenticated;
+grant execute on function public.att_change_pin(text, text) to authenticated;
+grant execute on function public.att_check_in(text, text) to authenticated;
+grant execute on function public.att_request_leave(text, text, date, date, text) to authenticated;
+grant execute on function public.att_delete_leave(text, uuid) to authenticated;
+grant execute on function public.att_set_holidays(jsonb) to authenticated;
+
+alter table public.attendance_settings enable row level security;
+alter table public.attendance_members  enable row level security;
+alter table public.attendance_records  enable row level security;
+alter table public.attendance_leaves   enable row level security;
+alter table public.attendance_holidays enable row level security;
+drop policy if exists "att_settings: admin all" on public.attendance_settings;
+drop policy if exists "att_members: admin all"  on public.attendance_members;
+drop policy if exists "att_records: read all"   on public.attendance_records;
+drop policy if exists "att_records: admin all"  on public.attendance_records;
+drop policy if exists "att_leaves: read all"    on public.attendance_leaves;
+drop policy if exists "att_leaves: admin all"   on public.attendance_leaves;
+drop policy if exists "att_holidays: read all"  on public.attendance_holidays;
+create policy "att_settings: admin all" on public.attendance_settings for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "att_members: admin all"  on public.attendance_members  for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "att_records: read all"   on public.attendance_records  for select to authenticated using (true);
+create policy "att_records: admin all"  on public.attendance_records  for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "att_leaves: read all"    on public.attendance_leaves   for select to authenticated using (true);
+create policy "att_leaves: admin all"   on public.attendance_leaves   for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "att_holidays: read all"  on public.attendance_holidays for select to authenticated using (true);
+
+-- =====================================================================
+-- 소모품 재고
+--   관리자가 중간 관리자(PIN)를 두고, 중간 관리자가 품목·보유량·단가를 등록/입고/조정.
+--   구성원은 소모 처리(재고 차감)만 하며 모든 변동은 inventory_moves 에 남습니다.
+-- =====================================================================
+create table if not exists public.inventory_managers (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  area        text not null default '',
+  pin_hash    text not null,
+  created_at  timestamptz not null default now()
+);
+create table if not exists public.inventory_items (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  category    text not null default '',
+  unit        text not null default '개',
+  location    text not null default '',
+  qty         numeric not null default 0 check (qty >= 0),
+  unit_price  bigint not null default 0,
+  min_qty     numeric not null default 0,
+  note        text not null default '',
+  active      boolean not null default true,
+  created_at  timestamptz not null default now(),
+  updated_at  timestamptz not null default now()
+);
+create table if not exists public.inventory_moves (
+  id           uuid primary key default gen_random_uuid(),
+  created_at   timestamptz not null default now(),
+  item_id      uuid not null references public.inventory_items (id) on delete cascade,
+  item_name    text not null default '',
+  location     text not null default '',
+  type         text not null check (type in ('init', 'in', 'out', 'adjust')),
+  qty          numeric not null,
+  unit_price   bigint not null default 0,
+  user_name    text not null default '',
+  note         text not null default '',
+  stock_after  numeric not null default 0
+);
+create index if not exists inventory_moves_item_idx on public.inventory_moves (item_id, created_at desc);
+
+drop view if exists public.inventory_managers_public;
+create view public.inventory_managers_public as select id, name, area, created_at from public.inventory_managers;
+alter view public.inventory_managers_public set (security_invoker = false);
+grant select on public.inventory_managers_public to authenticated;
+
+create or replace function public.inv_verify_manager(p_manager_id uuid, p_pin text) returns boolean language sql stable security definer set search_path = public as $$
+  select exists (select 1 from public.inventory_managers m where m.id = p_manager_id and m.pin_hash = encode(digest(coalesce(p_pin, ''), 'sha256'), 'hex'));
+$$;
+
+create or replace function public.inv_save_item(p_manager_id uuid, p_pin text, p_item jsonb)
+returns setof public.inventory_items language plpgsql security definer set search_path = public as $$
+declare v_mgr text; v_id uuid; v_cur public.inventory_items%rowtype; v_qty numeric; v_price bigint;
+begin
+  if not public.inv_verify_manager(p_manager_id, p_pin) then raise exception '담당자 PIN이 올바르지 않습니다.'; end if;
+  select name into v_mgr from public.inventory_managers where id = p_manager_id;
+  if coalesce(trim(p_item->>'name'), '') = '' then raise exception '품목명을 입력하세요.'; end if;
+  v_qty := greatest(0, coalesce((p_item->>'qty')::numeric, 0));
+  v_price := greatest(0, coalesce((p_item->>'unit_price')::bigint, 0));
+  if p_item->>'id' is null or p_item->>'id' = '' then
+    insert into public.inventory_items (name, category, unit, location, qty, unit_price, min_qty, note, active)
+    values (trim(p_item->>'name'), coalesce(p_item->>'category', ''), coalesce(nullif(p_item->>'unit', ''), '개'), coalesce(p_item->>'location', ''), v_qty, v_price,
+            coalesce((p_item->>'min_qty')::numeric, 0), coalesce(p_item->>'note', ''), coalesce((p_item->>'active')::boolean, true))
+    returning id into v_id;
+    insert into public.inventory_moves (item_id, item_name, location, type, qty, unit_price, user_name, note, stock_after)
+    values (v_id, trim(p_item->>'name'), coalesce(p_item->>'location', ''), 'init', v_qty, v_price, coalesce(v_mgr, ''), '초기 보유량', v_qty);
+  else
+    v_id := (p_item->>'id')::uuid;
+    select * into v_cur from public.inventory_items where id = v_id;
+    if not found then raise exception '품목을 찾을 수 없습니다.'; end if;
+    update public.inventory_items set name = trim(p_item->>'name'), category = coalesce(p_item->>'category', ''), unit = coalesce(nullif(p_item->>'unit', ''), unit),
+      location = coalesce(p_item->>'location', ''), qty = v_qty, unit_price = v_price, min_qty = coalesce((p_item->>'min_qty')::numeric, 0),
+      note = coalesce(p_item->>'note', ''), active = coalesce((p_item->>'active')::boolean, true), updated_at = now() where id = v_id;
+    if v_qty <> v_cur.qty then
+      insert into public.inventory_moves (item_id, item_name, location, type, qty, unit_price, user_name, note, stock_after)
+      values (v_id, trim(p_item->>'name'), coalesce(p_item->>'location', ''), 'adjust', v_qty - v_cur.qty, v_price, coalesce(v_mgr, ''), coalesce(nullif(p_item->>'adjust_note', ''), '재고 조정'), v_qty);
+    end if;
+  end if;
+  return query select * from public.inventory_items where id = v_id;
+end;
+$$;
+
+create or replace function public.inv_delete_item(p_manager_id uuid, p_pin text, p_item_id uuid) returns void language plpgsql security definer set search_path = public as $$
+begin
+  if not public.inv_verify_manager(p_manager_id, p_pin) then raise exception '담당자 PIN이 올바르지 않습니다.'; end if;
+  if exists (select 1 from public.inventory_moves where item_id = p_item_id and type = 'out') then raise exception '소모 기록이 있는 품목은 삭제할 수 없습니다. 사용 중지로 바꾸세요.'; end if;
+  delete from public.inventory_items where id = p_item_id;
+end;
+$$;
+
+create or replace function public.inv_restock(p_manager_id uuid, p_pin text, p_item_id uuid, p_qty numeric, p_unit_price bigint, p_note text)
+returns setof public.inventory_items language plpgsql security definer set search_path = public as $$
+declare v_mgr text; v_it public.inventory_items%rowtype; v_price bigint;
+begin
+  if not public.inv_verify_manager(p_manager_id, p_pin) then raise exception '담당자 PIN이 올바르지 않습니다.'; end if;
+  if coalesce(p_qty, 0) <= 0 then raise exception '입고 수량은 0보다 커야 합니다.'; end if;
+  select name into v_mgr from public.inventory_managers where id = p_manager_id;
+  select * into v_it from public.inventory_items where id = p_item_id for update;
+  if not found then raise exception '품목을 찾을 수 없습니다.'; end if;
+  v_price := case when coalesce(p_unit_price, 0) > 0 then p_unit_price else v_it.unit_price end;
+  update public.inventory_items set qty = qty + p_qty, unit_price = v_price, updated_at = now() where id = p_item_id;
+  insert into public.inventory_moves (item_id, item_name, location, type, qty, unit_price, user_name, note, stock_after)
+  values (p_item_id, v_it.name, v_it.location, 'in', p_qty, v_price, coalesce(v_mgr, ''), coalesce(p_note, ''), v_it.qty + p_qty);
+  return query select * from public.inventory_items where id = p_item_id;
+end;
+$$;
+
+create or replace function public.inv_consume(p_item_id uuid, p_qty numeric, p_note text)
+returns setof public.inventory_moves language plpgsql security definer set search_path = public as $$
+declare v_it public.inventory_items%rowtype; v_name text; v_id uuid;
+begin
+  if coalesce(p_qty, 0) <= 0 then raise exception '수량은 0보다 커야 합니다.'; end if;
+  select * into v_it from public.inventory_items where id = p_item_id and active for update;
+  if not found then raise exception '소모 처리할 수 없는 품목입니다.'; end if;
+  if p_qty > v_it.qty then raise exception '재고(%)보다 많습니다. 담당자에게 알려주세요.', v_it.qty; end if;
+  select name into v_name from public.profiles where id = auth.uid();
+  update public.inventory_items set qty = qty - p_qty, updated_at = now() where id = p_item_id;
+  insert into public.inventory_moves (item_id, item_name, location, type, qty, unit_price, user_name, note, stock_after)
+  values (p_item_id, v_it.name, v_it.location, 'out', p_qty, v_it.unit_price, coalesce(v_name, ''), coalesce(p_note, ''), v_it.qty - p_qty) returning id into v_id;
+  return query select * from public.inventory_moves where id = v_id;
+end;
+$$;
+
+revoke all on function public.inv_verify_manager(uuid, text) from public;
+revoke all on function public.inv_save_item(uuid, text, jsonb) from public;
+revoke all on function public.inv_delete_item(uuid, text, uuid) from public;
+revoke all on function public.inv_restock(uuid, text, uuid, numeric, bigint, text) from public;
+revoke all on function public.inv_consume(uuid, numeric, text) from public;
+grant execute on function public.inv_verify_manager(uuid, text) to authenticated;
+grant execute on function public.inv_save_item(uuid, text, jsonb) to authenticated;
+grant execute on function public.inv_delete_item(uuid, text, uuid) to authenticated;
+grant execute on function public.inv_restock(uuid, text, uuid, numeric, bigint, text) to authenticated;
+grant execute on function public.inv_consume(uuid, numeric, text) to authenticated;
+
+alter table public.inventory_managers enable row level security;
+alter table public.inventory_items    enable row level security;
+alter table public.inventory_moves    enable row level security;
+drop policy if exists "inv_managers: admin all" on public.inventory_managers;
+drop policy if exists "inv_items: read all"     on public.inventory_items;
+drop policy if exists "inv_items: admin all"    on public.inventory_items;
+drop policy if exists "inv_moves: read all"     on public.inventory_moves;
+drop policy if exists "inv_moves: admin all"    on public.inventory_moves;
+create policy "inv_managers: admin all" on public.inventory_managers for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "inv_items: read all"     on public.inventory_items    for select to authenticated using (true);
+create policy "inv_items: admin all"    on public.inventory_items    for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+create policy "inv_moves: read all"     on public.inventory_moves    for select to authenticated using (true);
+create policy "inv_moves: admin all"    on public.inventory_moves    for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+
 -- (선택) 특정 도메인만 가입 허용하려면 Supabase Dashboard > Authentication > Settings 에서
 -- "Restrict sign-ups to email domains" 에 kaist.ac.kr 을 추가하세요.

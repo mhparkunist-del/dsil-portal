@@ -33,6 +33,22 @@
              status:'pending'|'approved'|'rejected', projectId, approvedAmount, adminNote, processedAt, processedBy }
    ExportLog { id, createdAt, exportedById, exportedBy, purpose, format:'csv'|'print', count, totalAmount,
                filter:{from,to,projectId,includeRequests,includeReviews}, rows:[{kind,date,requester,title,category,project,code,amount,actual,provisional,by,note}] }
+
+   장비 예약 (equipment.js)
+     listEquipment()                                  -> Equipment[] (PIN 해시 제외, users:[{id,name,grantedAt,grantedBy}])
+     saveEquipment(eq, {managerPin})                  -> 관리자. managerPin 을 주면 담당자 PIN 재설정
+     deleteEquipment(id)
+     verifyManager(equipmentId, pin)                  -> boolean
+     grantUser(equipmentId, managerPin, name, userPin) -> user   (같은 이름이면 PIN 재설정)
+     revokeUser(equipmentId, managerPin, userId)
+     listReservations() / listUsageLogs()
+     createReservation({equipmentId, userPin, start, end, purpose}) -> 권한·PIN·중복·로그 기한 검사 후 생성
+     cancelReservation(id, {managerPin})              -> 본인의 예정 예약, 또는 담당자 PIN
+     createUsageLog({reservationId, usedStart, usedEnd, condition, content, issues})
+     waiveUsageLog(reservationId, managerPin, note)   -> 담당자가 로그 면제 처리
+   Equipment   { id, name, location, managerName, description, rules, color, active, createdAt, users }
+   Reservation { id, createdAt, equipmentId, userId, userName, start, end, purpose, status:'booked'|'cancelled', logId, cancelledAt, cancelledBy }
+   UsageLog    { id, createdAt, reservationId, equipmentId, userId, userName, usedStart, usedEnd, condition:'normal'|'issue', content, issues, waived, waivedBy }
    ===================================================================== */
 (function () {
   'use strict';
@@ -59,6 +75,45 @@
     return cats.map(function (c) { return c.id; });
   }
 
+  /* 오늘 기준 dayOffset 일 뒤 hour:minute (로컬) → ISO */
+  function at(dayOffset, hour, minute) {
+    var d = new Date();
+    d.setDate(d.getDate() + dayOffset);
+    d.setHours(hour, minute || 0, 0, 0);
+    return d.toISOString();
+  }
+  function nameKey(s) { return String(s || '').replace(/\s+/g, '').toLowerCase(); }
+  function isSameUser(r, user) { return !!user && (r.userId === user.id || nameKey(r.userName) === nameKey(user.name)); }
+  function publicUser(u) { return { id: u.id, name: u.name, grantedAt: u.grantedAt, grantedBy: u.grantedBy || '' }; }
+  function publicEquipment(eq) {
+    return { id: eq.id, name: eq.name, location: eq.location || '', managerName: eq.managerName || '', description: eq.description || '', rules: eq.rules || '',
+      color: eq.color || '#004191', active: eq.active !== false, createdAt: eq.createdAt, hasManagerPin: !!eq.managerPinHash, users: (eq.users || []).map(publicUser) };
+  }
+  function fmtRangeShort(r) {
+    var s = new Date(r.start), e = new Date(r.end);
+    function p(n) { return String(n).padStart(2, '0'); }
+    return s.getMonth() + 1 + '/' + s.getDate() + ' ' + p(s.getHours()) + ':' + p(s.getMinutes()) + '–' + p(e.getHours()) + ':' + p(e.getMinutes());
+  }
+  function equipmentCfg(cfg) { return Object.assign({ maxHours: 8, logDueDays: 7 }, cfg.equipment || {}); }
+
+  /* ---------- 출석 공통 규칙 ---------- */
+  var ATT_KEY = 'dsil-att-session-v1';
+  function attendanceCfg(cfg) { return Object.assign({ lateAfter: '09:00', closeAfter: '11:00', vacationDaysPerHalf: 2, selfRegister: true, holidays: {} }, cfg.attendance || {}); }
+  function ymdLocal(d) { function p(n) { return String(n).padStart(2, '0'); } return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); }
+  function hmLocal(d) { function p(n) { return String(n).padStart(2, '0'); } return p(d.getHours()) + ':' + p(d.getMinutes()); }
+  function isWeekend(dateStr) { var d = new Date(dateStr + 'T00:00:00'); var w = d.getDay(); return w === 0 || w === 6; }
+  function halfKey(dateStr) { var m = Number(dateStr.slice(5, 7)); return dateStr.slice(0, 4) + (m <= 6 ? 'H1' : 'H2'); }
+  function eachDate(from, to, fn) {
+    var d = new Date(from + 'T00:00:00'), end = new Date(to + 'T00:00:00');
+    while (d <= end) { fn(ymdLocal(d)); d.setDate(d.getDate() + 1); }
+  }
+  function workdaysBetween(from, to, holidays) {
+    var n = 0; eachDate(from, to, function (s) { if (!isWeekend(s) && !holidays[s]) n++; }); return n;
+  }
+  function publicMember(m) { return { id: m.id, name: m.name, active: m.active !== false, createdAt: m.createdAt }; }
+  function readAttSession() { try { return JSON.parse(sessionStorage.getItem(ATT_KEY) || 'null'); } catch (e) { return null; } }
+  function writeAttSession(s) { try { if (s) sessionStorage.setItem(ATT_KEY, JSON.stringify(s)); else sessionStorage.removeItem(ATT_KEY); } catch (e) { /* ignore */ } }
+
   /* 열람 PIN 해시 (SHA-256 hex). 보안 컨텍스트가 아니면 약한 대체 해시 – 로컬 데모용 */
   function fallbackHash(s) {
     var h = 0x811c9dc5;
@@ -81,7 +136,78 @@
   function seedData() {
     var p1 = uid(), p2 = uid(), p3 = uid();
     var rv1 = uid(), rv2 = uid();
+    var e1 = uid(), e2 = uid(), e3 = uid();
+    var r1 = uid(), r2 = uid(), r3 = uid(), r4 = uid(), r5 = uid(), r6 = uid();
+    var l1 = uid();
+    var demoUsers = function () {
+      return ['홍길동', '이영희', '박철수'].map(function (n) { return { id: uid(), name: n, pinHash: DEMO_PIN_HASH, grantedAt: daysAgo(60), grantedBy: '관리자' }; });
+    };
     return {
+      equipment: [
+        { id: e1, name: '프로브 스테이션 (Keithley 2636B)', location: 'E3-3 2302호 측정실', managerName: '이영희', managerPinHash: DEMO_PIN_HASH, description: 'DC I-V, 저온 측정. 4개 매니퓰레이터.', rules: '사용 전 챔버 진공 확인\n텅스텐 팁 교체 시 로그에 기재\n1회 최대 4시간', color: '#004191', active: true, createdAt: daysAgo(200), users: demoUsers() },
+        { id: e2, name: 'RF 스퍼터 증착기', location: 'E3-3 지하 클린룸', managerName: '박철수', managerPinHash: DEMO_PIN_HASH, description: '3-gun 스퍼터. 타겟 교체는 담당자에게.', rules: '베이킹 후 사용\n타겟 잔량 로그 필수', color: '#f76707', active: true, createdAt: daysAgo(200), users: demoUsers().slice(0, 2) },
+        { id: e3, name: '광학 현미경 (Nikon LV150)', location: 'E3-3 2302호', managerName: '홍길동', managerPinHash: DEMO_PIN_HASH, description: '명시야/암시야, 100x까지.', rules: '렌즈 접촉 금지', color: '#2fb344', active: true, createdAt: daysAgo(150), users: demoUsers() }
+      ],
+      reservations: [
+        { id: r1, createdAt: daysAgo(1), equipmentId: e1, userId: 'demo-1', userName: '홍길동', start: at(1, 10, 0), end: at(1, 12, 0), purpose: 'TMD 소자 I-V 측정', status: 'booked', logId: null, cancelledAt: null, cancelledBy: null },
+        { id: r2, createdAt: daysAgo(1), equipmentId: e2, userId: 'demo-2', userName: '이영희', start: at(0, 14, 0), end: at(0, 17, 0), purpose: 'HfO2 게이트 증착', status: 'booked', logId: null, cancelledAt: null, cancelledBy: null },
+        { id: r3, createdAt: daysAgo(2), equipmentId: e3, userId: 'demo-3', userName: '박철수', start: at(2, 9, 30), end: at(2, 11, 0), purpose: '전사 후 표면 확인', status: 'booked', logId: null, cancelledAt: null, cancelledBy: null },
+        { id: r4, createdAt: daysAgo(5), equipmentId: e1, userId: 'demo-3', userName: '박철수', start: at(-3, 13, 0), end: at(-3, 16, 0), purpose: 'Cu 필러 저항 측정', status: 'booked', logId: l1, cancelledAt: null, cancelledBy: null },
+        { id: r5, createdAt: daysAgo(12), equipmentId: e2, userId: 'demo-1', userName: '홍길동', start: at(-10, 9, 0), end: at(-10, 12, 0), purpose: 'Ti/Au 전극 증착', status: 'booked', logId: null, cancelledAt: null, cancelledBy: null },
+        { id: r6, createdAt: daysAgo(3), equipmentId: e3, userId: 'demo-2', userName: '이영희', start: at(-2, 15, 0), end: at(-2, 16, 0), purpose: 'PDMS 스탬프 검사', status: 'booked', logId: null, cancelledAt: null, cancelledBy: null }
+      ],
+      usageLogs: [
+        { id: l1, createdAt: daysAgo(3), reservationId: r4, equipmentId: e1, userId: 'demo-3', userName: '박철수', usedStart: at(-3, 13, 10), usedEnd: at(-3, 15, 40), condition: 'normal', content: '4-probe, 10 mA 컴플라이언스. 시편 3종.', issues: '', waived: false, waivedBy: null }
+      ],
+      attMembers: [
+        { id: 'att-1', name: '홍길동', pinHash: DEMO_PIN_HASH, active: true, createdAt: daysAgo(100) },
+        { id: 'att-2', name: '이영희', pinHash: DEMO_PIN_HASH, active: true, createdAt: daysAgo(100) },
+        { id: 'att-3', name: '박철수', pinHash: DEMO_PIN_HASH, active: true, createdAt: daysAgo(100) }
+      ],
+      attRecords: (function () {
+        /* 최근 10 근무일의 예시 출석: 홍길동 정상 위주, 이영희 지각 1회·참작 1회, 박철수 하루 결근(기록 없음) */
+        var out = [], d = new Date(), count = 0, i = 1;
+        while (count < 10) {
+          var day = new Date(d); day.setDate(d.getDate() - i); i++;
+          var w = day.getDay(); if (w === 0 || w === 6) continue;
+          var ds = ymdLocal(day);
+          function rec(id, name, h, m, status, reason) {
+            var t = new Date(day); t.setHours(h, m, 0, 0);
+            out.push({ id: uid(), memberId: id, name: name, date: ds, status: status, checkInAt: t.toISOString(), reason: reason || '', createdAt: t.toISOString() });
+          }
+          rec('att-1', '홍길동', 8, 40 + (count % 3) * 5, 'present');
+          if (count === 2) rec('att-2', '이영희', 9, 25, 'late'); else if (count === 5) rec('att-2', '이영희', 9, 40, 'excused', '병원 진료'); else rec('att-2', '이영희', 8, 50, 'present');
+          if (count !== 4) rec('att-3', '박철수', 8, 55, 'present');
+          count++;
+        }
+        return out;
+      })(),
+      attLeaves: [
+        { id: uid(), memberId: 'att-3', name: '박철수', type: 'trip', startDate: at(3, 0).slice(0, 10), endDate: at(4, 0).slice(0, 10), days: 2, reason: '삼성전자 협력 미팅 (화성)', createdAt: daysAgo(2) },
+        { id: uid(), memberId: 'att-1', name: '홍길동', type: 'vacation', startDate: at(8, 0).slice(0, 10), endDate: at(8, 0).slice(0, 10), days: 1, reason: '', createdAt: daysAgo(1) }
+      ],
+      attHolidays: null,
+      invManagers: [
+        { id: 'invm-1', name: '이영희', pinHash: DEMO_PIN_HASH, area: '클린룸 케미컬·기판', createdAt: daysAgo(90) },
+        { id: 'invm-2', name: '박철수', pinHash: DEMO_PIN_HASH, area: '측정실 소모품', createdAt: daysAgo(90) }
+      ],
+      invItems: [
+        { id: 'inv-1', name: '6인치 SiO2/Si 웨이퍼 (300 nm)', category: '웨이퍼·기판', unit: '매', location: '클린룸 캐비닛 A', qty: 18, unitPrice: 74000, minQty: 10, note: '', active: true, createdAt: daysAgo(60), updatedAt: daysAgo(2) },
+        { id: 'inv-2', name: 'IPA (반도체급) 4 L', category: '케미컬·가스', unit: '병', location: '클린룸 케미컬 장', qty: 3, unitPrice: 42000, minQty: 4, note: '환기 후 사용', active: true, createdAt: daysAgo(60), updatedAt: daysAgo(1) },
+        { id: 'inv-3', name: 'PR AZ5214E 500 mL', category: '케미컬·가스', unit: '병', location: '클린룸 케미컬 장', qty: 2, unitPrice: 310000, minQty: 1, note: '냉장 보관', active: true, createdAt: daysAgo(60), updatedAt: daysAgo(10) },
+        { id: 'inv-4', name: 'Ti 스퍼터 타겟 2인치', category: '전구체·타겟', unit: '개', location: '클린룸 캐비닛 A', qty: 1, unitPrice: 480000, minQty: 1, note: '', active: true, createdAt: daysAgo(60), updatedAt: daysAgo(20) },
+        { id: 'inv-5', name: '텅스텐 프로브 팁 (10개입)', category: '소모품·공구', unit: '팩', location: '측정실 서랍 2', qty: 4, unitPrice: 95000, minQty: 2, note: '', active: true, updatedAt: daysAgo(3), createdAt: daysAgo(60) },
+        { id: 'inv-6', name: '니트릴 장갑 M (100매)', category: '소모품·공구', unit: '박스', location: '측정실 서랍 2', qty: 7, unitPrice: 12000, minQty: 3, note: '', active: true, updatedAt: daysAgo(1), createdAt: daysAgo(60) }
+      ],
+      invMoves: [
+        { id: uid(), createdAt: daysAgo(60), itemId: 'inv-1', itemName: '6인치 SiO2/Si 웨이퍼 (300 nm)', location: '클린룸 캐비닛 A', type: 'init', qty: 25, unitPrice: 74000, userName: '이영희', note: '초기 보유량', stockAfter: 25 },
+        { id: uid(), createdAt: daysAgo(12), itemId: 'inv-1', itemName: '6인치 SiO2/Si 웨이퍼 (300 nm)', location: '클린룸 캐비닛 A', type: 'out', qty: 5, unitPrice: 74000, userName: '홍길동', note: 'TMD 성장 기판', stockAfter: 20 },
+        { id: uid(), createdAt: daysAgo(2), itemId: 'inv-1', itemName: '6인치 SiO2/Si 웨이퍼 (300 nm)', location: '클린룸 캐비닛 A', type: 'out', qty: 2, unitPrice: 74000, userName: '박철수', note: '패키징 시편', stockAfter: 18 },
+        { id: uid(), createdAt: daysAgo(60), itemId: 'inv-2', itemName: 'IPA (반도체급) 4 L', location: '클린룸 케미컬 장', type: 'init', qty: 6, unitPrice: 42000, userName: '이영희', note: '초기 보유량', stockAfter: 6 },
+        { id: uid(), createdAt: daysAgo(1), itemId: 'inv-2', itemName: 'IPA (반도체급) 4 L', location: '클린룸 케미컬 장', type: 'out', qty: 3, unitPrice: 42000, userName: '이영희', note: '세정', stockAfter: 3 },
+        { id: uid(), createdAt: daysAgo(60), itemId: 'inv-5', itemName: '텅스텐 프로브 팁 (10개입)', location: '측정실 서랍 2', type: 'init', qty: 6, unitPrice: 95000, userName: '박철수', note: '초기 보유량', stockAfter: 6 },
+        { id: uid(), createdAt: daysAgo(3), itemId: 'inv-5', itemName: '텅스텐 프로브 팁 (10개입)', location: '측정실 서랍 2', type: 'out', qty: 2, unitPrice: 95000, userName: '홍길동', note: '', stockAfter: 4 }
+      ],
       projects: [
         { id: p1, code: '2026-A01', name: '차세대 AI 반도체 모놀리식 3D 집적 기술', budgets: { material: 25000000, activity: 10000000, equipment: 15000000, other: 0 }, startDate: '2026-03-01', endDate: '2027-02-28', manager: '김교수', note: '재료비 위주 집행', active: true, createdAt: daysAgo(120) },
         { id: p2, code: '2026-B07', name: '산화물 반도체 기반 DRAM 셀 소자 개발', budgets: { material: 18000000, activity: 7000000, equipment: 5000000, other: 0 }, startDate: '2026-01-01', endDate: '2026-12-31', manager: '김교수', note: '', active: true, createdAt: daysAgo(200) },
@@ -133,8 +259,21 @@
     });
     if (!Array.isArray(data.reviews)) data.reviews = [];
     if (!Array.isArray(data.exports)) data.exports = [];
+    if (!Array.isArray(data.equipment)) data.equipment = [];
+    if (!Array.isArray(data.reservations)) data.reservations = [];
+    if (!Array.isArray(data.usageLogs)) data.usageLogs = [];
+    data.equipment.forEach(function (eq) { if (!Array.isArray(eq.users)) eq.users = []; });
+    if (!Array.isArray(data.attMembers)) data.attMembers = [];
+    if (!Array.isArray(data.attRecords)) data.attRecords = [];
+    if (!Array.isArray(data.attLeaves)) data.attLeaves = [];
+    if (!data.attHolidays || typeof data.attHolidays !== 'object') data.attHolidays = Object.assign({}, attendanceCfg(cfg).holidays);
+    if (!Array.isArray(data.invManagers)) data.invManagers = [];
+    if (!Array.isArray(data.invItems)) data.invItems = [];
+    if (!Array.isArray(data.invMoves)) data.invMoves = [];
     return data;
   }
+
+  function publicInvManager(m) { return { id: m.id, name: m.name, area: m.area || '', createdAt: m.createdAt }; }
 
   function limitedReview(rv) {
     return { id: rv.id, createdAt: rv.createdAt, requesterId: rv.requesterId, requesterName: rv.requesterName, title: rv.title, status: rv.status, processedAt: rv.processedAt, limited: true };
@@ -153,7 +292,8 @@
     function read() {
       try { data = JSON.parse(localStorage.getItem(DATA_KEY) || 'null'); } catch (e) { data = null; }
       if (!data || !Array.isArray(data.projects) || !Array.isArray(data.requests)) {
-        data = cfg.seedDemoData ? seedData() : { projects: [], requests: [], reviews: [], exports: [] };
+        data = cfg.seedDemoData ? seedData() : { projects: [], requests: [], reviews: [], exports: [], equipment: [], reservations: [], usageLogs: [] };
+        migrate(data, cfg);
         write();
       } else {
         migrate(data, cfg);
@@ -306,6 +446,396 @@
         return Promise.resolve(clone(rec));
       },
 
+      /* ---------- 장비 예약 ---------- */
+      listEquipment: function () { return Promise.resolve(data.equipment.map(publicEquipment)); },
+
+      saveEquipment: function (eq, opts) {
+        var idx = data.equipment.findIndex(function (x) { return x.id === eq.id; });
+        var base = idx >= 0 ? data.equipment[idx] : { id: uid(), createdAt: nowISO(), users: [], managerPinHash: '' };
+        var rec = Object.assign({}, base, { name: eq.name, location: eq.location || '', managerName: eq.managerName || '', description: eq.description || '', rules: eq.rules || '', color: eq.color || '#004191', active: eq.active !== false });
+        var p = (opts && opts.managerPin) ? hashPin(opts.managerPin).then(function (h) { rec.managerPinHash = h; }) : Promise.resolve();
+        return p.then(function () {
+          if (idx >= 0) data.equipment[idx] = rec; else data.equipment.push(rec);
+          write(); emit();
+          return publicEquipment(rec);
+        });
+      },
+
+      deleteEquipment: function (id) {
+        if (data.reservations.some(function (r) { return r.equipmentId === id; })) return Promise.reject(new Error('예약 기록이 있는 장비는 삭제할 수 없습니다. 비활성으로 바꾸세요.'));
+        data.equipment = data.equipment.filter(function (x) { return x.id !== id; });
+        write(); emit();
+        return Promise.resolve();
+      },
+
+      verifyManager: function (equipmentId, pin) {
+        var eq = data.equipment.filter(function (x) { return x.id === equipmentId; })[0];
+        if (!eq || !eq.managerPinHash) return Promise.resolve(false);
+        return hashPin(pin).then(function (h) { return h === eq.managerPinHash; });
+      },
+
+      grantUser: function (equipmentId, managerPin, name, userPin) {
+        var eq = data.equipment.filter(function (x) { return x.id === equipmentId; })[0];
+        if (!eq) return Promise.reject(new Error('장비를 찾을 수 없습니다.'));
+        var nm = String(name || '').trim();
+        if (!nm) return Promise.reject(new Error('이름을 입력하세요.'));
+        return Promise.all([hashPin(managerPin), hashPin(userPin)]).then(function (hs) {
+          if (hs[0] !== eq.managerPinHash) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
+          var key = nameKey(nm);
+          var u = eq.users.filter(function (x) { return nameKey(x.name) === key; })[0];
+          var by = session ? session.user.name : '';
+          if (u) { u.pinHash = hs[1]; u.name = nm; u.grantedAt = nowISO(); u.grantedBy = by; }
+          else { u = { id: uid(), name: nm, pinHash: hs[1], grantedAt: nowISO(), grantedBy: by }; eq.users.push(u); }
+          write(); emit();
+          return publicUser(u);
+        });
+      },
+
+      revokeUser: function (equipmentId, managerPin, userId) {
+        var eq = data.equipment.filter(function (x) { return x.id === equipmentId; })[0];
+        if (!eq) return Promise.reject(new Error('장비를 찾을 수 없습니다.'));
+        return hashPin(managerPin).then(function (h) {
+          if (h !== eq.managerPinHash) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
+          eq.users = eq.users.filter(function (x) { return x.id !== userId; });
+          write(); emit();
+        });
+      },
+
+      listReservations: function () { return Promise.resolve(clone(data.reservations)); },
+      listUsageLogs: function () { return Promise.resolve(clone(data.usageLogs)); },
+
+      createReservation: function (r) {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var ecfg = equipmentCfg(cfg);
+        var eq = data.equipment.filter(function (x) { return x.id === r.equipmentId; })[0];
+        if (!eq || eq.active === false) return Promise.reject(new Error('예약할 수 없는 장비입니다.'));
+        var me = session.user;
+        var u = eq.users.filter(function (x) { return nameKey(x.name) === nameKey(me.name); })[0];
+        if (!u) return Promise.reject(new Error('이 장비의 사용 권한이 없습니다. 장비 담당자(' + (eq.managerName || '미지정') + ')에게 사용자 PIN을 받으세요.'));
+        return hashPin(r.userPin).then(function (h) {
+          if (h !== u.pinHash) throw new Error('사용자 PIN이 올바르지 않습니다.');
+          var start = new Date(r.start), end = new Date(r.end), now = new Date();
+          if (isNaN(start) || isNaN(end) || end <= start) throw new Error('시작·종료 시각을 확인하세요.');
+          if (end <= now) throw new Error('이미 지난 시간은 예약할 수 없습니다.');
+          if ((end - start) / 3600000 > ecfg.maxHours) throw new Error('1회 예약은 최대 ' + ecfg.maxHours + '시간입니다.');
+          var dueMs = ecfg.logDueDays * 86400000;
+          var overdue = data.reservations.filter(function (x) { return x.status === 'booked' && !x.logId && isSameUser(x, me) && (now - new Date(x.end)) > dueMs; });
+          if (overdue.length) throw new Error('사용 로그를 ' + ecfg.logDueDays + '일 넘게 작성하지 않은 예약이 ' + overdue.length + '건 있습니다. 로그를 먼저 작성하세요.');
+          var clash = data.reservations.filter(function (x) { return x.status === 'booked' && x.equipmentId === eq.id && new Date(x.start) < end && new Date(x.end) > start; })[0];
+          if (clash) throw new Error('같은 시간에 ' + clash.userName + '님의 예약이 있습니다 (' + fmtRangeShort(clash) + ').');
+          var rec = { id: uid(), createdAt: nowISO(), equipmentId: eq.id, userId: me.id, userName: me.name, start: start.toISOString(), end: end.toISOString(),
+            purpose: String(r.purpose || '').trim(), status: 'booked', logId: null, cancelledAt: null, cancelledBy: null };
+          data.reservations.push(rec);
+          write(); emit();
+          return clone(rec);
+        });
+      },
+
+      cancelReservation: function (id, opts) {
+        var r = data.reservations.filter(function (x) { return x.id === id; })[0];
+        if (!r) return Promise.reject(new Error('예약을 찾을 수 없습니다.'));
+        if (r.status !== 'booked') return Promise.reject(new Error('이미 취소된 예약입니다.'));
+        var me = session ? session.user : null;
+        var p;
+        if (me && isSameUser(r, me) && new Date(r.start) > new Date()) p = Promise.resolve(true);
+        else if (opts && opts.managerPin) {
+          var eq = data.equipment.filter(function (x) { return x.id === r.equipmentId; })[0];
+          p = hashPin(opts.managerPin).then(function (h) { return !!eq && h === eq.managerPinHash; });
+        } else p = Promise.resolve(false);
+        return p.then(function (ok) {
+          if (!ok) throw new Error('본인의 예정된 예약만 취소할 수 있습니다. 지난 예약은 장비 담당자가 처리합니다.');
+          r.status = 'cancelled'; r.cancelledAt = nowISO(); r.cancelledBy = me ? me.name : '';
+          write(); emit();
+          return clone(r);
+        });
+      },
+
+      createUsageLog: function (log) {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var r = data.reservations.filter(function (x) { return x.id === log.reservationId; })[0];
+        if (!r || r.status !== 'booked') return Promise.reject(new Error('로그를 쓸 예약을 찾을 수 없습니다.'));
+        if (r.logId) return Promise.reject(new Error('이미 로그가 작성된 예약입니다.'));
+        if (!isSameUser(r, session.user)) return Promise.reject(new Error('본인 예약의 로그만 작성할 수 있습니다.'));
+        var rec = { id: uid(), createdAt: nowISO(), reservationId: r.id, equipmentId: r.equipmentId, userId: session.user.id, userName: session.user.name,
+          usedStart: log.usedStart || r.start, usedEnd: log.usedEnd || r.end, condition: log.condition === 'issue' ? 'issue' : 'normal',
+          content: String(log.content || '').trim(), issues: String(log.issues || '').trim(), waived: false, waivedBy: null };
+        data.usageLogs.push(rec);
+        r.logId = rec.id;
+        write(); emit();
+        return Promise.resolve(clone(rec));
+      },
+
+      waiveUsageLog: function (reservationId, managerPin, note) {
+        var r = data.reservations.filter(function (x) { return x.id === reservationId; })[0];
+        if (!r || r.status !== 'booked') return Promise.reject(new Error('예약을 찾을 수 없습니다.'));
+        if (r.logId) return Promise.reject(new Error('이미 로그가 있는 예약입니다.'));
+        var eq = data.equipment.filter(function (x) { return x.id === r.equipmentId; })[0];
+        return hashPin(managerPin).then(function (h) {
+          if (!eq || h !== eq.managerPinHash) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
+          var rec = { id: uid(), createdAt: nowISO(), reservationId: r.id, equipmentId: r.equipmentId, userId: r.userId, userName: r.userName,
+            usedStart: r.start, usedEnd: r.end, condition: 'normal', content: String(note || '').trim(), issues: '', waived: true, waivedBy: session ? session.user.name : '' };
+          data.usageLogs.push(rec);
+          r.logId = rec.id;
+          write(); emit();
+          return clone(rec);
+        });
+      },
+
+      /* ---------- 출석 ---------- */
+      attSession: function () { return readAttSession(); },
+      attLogout: function () { writeAttSession(null); return Promise.resolve(); },
+
+      attLogin: function (name, pin) {
+        var acfg = attendanceCfg(cfg);
+        var nm = String(name || '').trim();
+        if (!nm) return Promise.reject(new Error('아이디(이름)를 입력하세요.'));
+        if (!/^\d{4,8}$/.test(String(pin || ''))) return Promise.reject(new Error('PIN은 숫자 4~8자리입니다.'));
+        var key = nameKey(nm);
+        var m = data.attMembers.filter(function (x) { return nameKey(x.name) === key; })[0];
+        return hashPin(pin).then(function (h) {
+          if (!m) {
+            if (!acfg.selfRegister) throw new Error('등록되지 않은 아이디입니다. 관리자에게 등록을 요청하세요.');
+            m = { id: uid(), name: nm, pinHash: h, active: true, createdAt: nowISO() };
+            data.attMembers.push(m); write(); emit();
+          } else {
+            if (m.active === false) throw new Error('사용이 중지된 아이디입니다. 관리자에게 문의하세요.');
+            if (m.pinHash !== h) throw new Error('PIN이 올바르지 않습니다.');
+          }
+          var s = { memberId: m.id, name: m.name, pin: String(pin), ts: Date.now() };
+          writeAttSession(s);
+          return publicMember(m);
+        });
+      },
+
+      attChangePin: function (oldPin, newPin) {
+        var s = readAttSession(); if (!s) return Promise.reject(new Error('로그인이 필요합니다.'));
+        var m = data.attMembers.filter(function (x) { return x.id === s.memberId; })[0];
+        if (!m) return Promise.reject(new Error('구성원을 찾을 수 없습니다.'));
+        if (!/^\d{4,8}$/.test(String(newPin || ''))) return Promise.reject(new Error('새 PIN은 숫자 4~8자리입니다.'));
+        return Promise.all([hashPin(oldPin), hashPin(newPin)]).then(function (hs) {
+          if (hs[0] !== m.pinHash) throw new Error('현재 PIN이 올바르지 않습니다.');
+          m.pinHash = hs[1]; write(); emit();
+          writeAttSession(Object.assign({}, s, { pin: String(newPin) }));
+        });
+      },
+
+      attListMembers: function () { return Promise.resolve(data.attMembers.map(publicMember)); },
+
+      attSaveMember: function (m, opts) {
+        var nm = String(m.name || '').trim();
+        if (!nm) return Promise.reject(new Error('이름을 입력하세요.'));
+        var idx = data.attMembers.findIndex(function (x) { return x.id === m.id; });
+        var dup = data.attMembers.filter(function (x, i) { return i !== idx && nameKey(x.name) === nameKey(nm); })[0];
+        if (dup) return Promise.reject(new Error('같은 이름의 구성원이 이미 있습니다.'));
+        var base = idx >= 0 ? data.attMembers[idx] : { id: uid(), createdAt: nowISO(), pinHash: '' };
+        var rec = Object.assign({}, base, { name: nm, active: m.active !== false });
+        var p = (opts && opts.pin) ? hashPin(opts.pin).then(function (h) { rec.pinHash = h; }) : Promise.resolve();
+        return p.then(function () {
+          if (!rec.pinHash) throw new Error('초기 PIN을 정해 주세요.');
+          if (idx >= 0) data.attMembers[idx] = rec; else data.attMembers.push(rec);
+          write(); emit();
+          return publicMember(rec);
+        });
+      },
+
+      attDeleteMember: function (id) {
+        if (data.attRecords.some(function (r) { return r.memberId === id; }) || data.attLeaves.some(function (l) { return l.memberId === id; })) {
+          return Promise.reject(new Error('출석 기록이 있는 구성원은 삭제할 수 없습니다. 사용 중지로 바꾸세요.'));
+        }
+        data.attMembers = data.attMembers.filter(function (x) { return x.id !== id; });
+        write(); emit(); return Promise.resolve();
+      },
+
+      attListRecords: function () { return Promise.resolve(clone(data.attRecords)); },
+      attListLeaves: function () { return Promise.resolve(clone(data.attLeaves)); },
+      attListHolidays: function () { return Promise.resolve(clone(data.attHolidays)); },
+      attSaveHolidays: function (obj) { data.attHolidays = clone(obj || {}); write(); emit(); return Promise.resolve(); },
+
+      attCheckIn: function (reason) {
+        var s = readAttSession(); if (!s) return Promise.reject(new Error('로그인이 필요합니다.'));
+        var m = data.attMembers.filter(function (x) { return x.id === s.memberId; })[0];
+        if (!m || m.active === false) return Promise.reject(new Error('사용할 수 없는 아이디입니다.'));
+        var acfg = attendanceCfg(cfg);
+        var now = new Date(), today = ymdLocal(now), hm = hmLocal(now);
+        if (isWeekend(today)) return Promise.reject(new Error('주말에는 출석 체크가 없습니다.'));
+        if (data.attHolidays[today]) return Promise.reject(new Error('공휴일(' + data.attHolidays[today] + ')에는 출석 체크가 없습니다.'));
+        var leave = data.attLeaves.filter(function (l) { return l.memberId === m.id && l.startDate <= today && today <= l.endDate; })[0];
+        if (leave) return Promise.reject(new Error('오늘은 ' + (leave.type === 'trip' ? '출장' : '휴가') + '으로 등록되어 있어 출석 체크를 하지 않습니다.'));
+        if (data.attRecords.some(function (r) { return r.memberId === m.id && r.date === today; })) return Promise.reject(new Error('오늘은 이미 출석 체크를 했습니다.'));
+        if (hm >= acfg.closeAfter) return Promise.reject(new Error(acfg.closeAfter + ' 이후에는 출석 체크를 할 수 없습니다. 오늘은 미기입(결근)으로 처리됩니다.'));
+        var status = hm < acfg.lateAfter ? 'present' : (String(reason || '').trim() ? 'excused' : 'late');
+        var rec = { id: uid(), memberId: m.id, name: m.name, date: today, status: status, checkInAt: now.toISOString(), reason: status === 'present' ? '' : String(reason || '').trim(), createdAt: now.toISOString() };
+        data.attRecords.push(rec); write(); emit();
+        return Promise.resolve(clone(rec));
+      },
+
+      attUpdateRecord: function (id, patch) {
+        var idx = data.attRecords.findIndex(function (x) { return x.id === id; });
+        if (idx < 0) return Promise.reject(new Error('기록을 찾을 수 없습니다.'));
+        data.attRecords[idx] = Object.assign({}, data.attRecords[idx], patch);
+        write(); emit(); return Promise.resolve(clone(data.attRecords[idx]));
+      },
+
+      attAdminSetDay: function (memberId, date, status, reason) {
+        /* 관리자가 특정 날짜의 상태를 직접 지정 (기록 생성/수정/삭제) */
+        var m = data.attMembers.filter(function (x) { return x.id === memberId; })[0];
+        if (!m) return Promise.reject(new Error('구성원을 찾을 수 없습니다.'));
+        data.attRecords = data.attRecords.filter(function (r) { return !(r.memberId === memberId && r.date === date); });
+        if (status && status !== 'absent') {
+          var t = new Date(date + 'T09:00:00');
+          data.attRecords.push({ id: uid(), memberId: m.id, name: m.name, date: date, status: status, checkInAt: t.toISOString(), reason: String(reason || '').trim(), createdAt: nowISO(), editedBy: session ? session.user.name : '관리자' });
+        }
+        write(); emit(); return Promise.resolve();
+      },
+
+      attRequestLeave: function (req) {
+        var s = readAttSession(); if (!s) return Promise.reject(new Error('로그인이 필요합니다.'));
+        var m = data.attMembers.filter(function (x) { return x.id === s.memberId; })[0];
+        if (!m) return Promise.reject(new Error('구성원을 찾을 수 없습니다.'));
+        var acfg = attendanceCfg(cfg);
+        var type = req.type === 'trip' ? 'trip' : 'vacation';
+        var from = String(req.startDate || ''), to = String(req.endDate || from);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || to < from) return Promise.reject(new Error('날짜를 확인하세요.'));
+        var reason = String(req.reason || '').trim();
+        if (type === 'trip' && !reason) return Promise.reject(new Error('출장 사유를 입력하세요.'));
+        var days = workdaysBetween(from, to, data.attHolidays);
+        if (days <= 0) return Promise.reject(new Error('선택한 기간에 근무일이 없습니다.'));
+        var overlap = data.attLeaves.filter(function (l) { return l.memberId === m.id && l.startDate <= to && from <= l.endDate; })[0];
+        if (overlap) return Promise.reject(new Error('이미 ' + overlap.startDate + ' ~ ' + overlap.endDate + ' 에 ' + (overlap.type === 'trip' ? '출장' : '휴가') + '이 등록되어 있습니다.'));
+        var checked = data.attRecords.filter(function (r) { return r.memberId === m.id && from <= r.date && r.date <= to; })[0];
+        if (checked) return Promise.reject(new Error(checked.date + ' 에 이미 출석 기록이 있습니다.'));
+        if (type === 'vacation') {
+          var perHalf = {};
+          eachDate(from, to, function (d) { if (!isWeekend(d) && !data.attHolidays[d]) { var k = halfKey(d); perHalf[k] = (perHalf[k] || 0) + 1; } });
+          var used = {};
+          data.attLeaves.forEach(function (l) { if (l.memberId !== m.id || l.type !== 'vacation') return; eachDate(l.startDate, l.endDate, function (d) { if (!isWeekend(d) && !data.attHolidays[d]) { var k = halfKey(d); used[k] = (used[k] || 0) + 1; } }); });
+          for (var k in perHalf) {
+            if ((used[k] || 0) + perHalf[k] > acfg.vacationDaysPerHalf) {
+              return Promise.reject(new Error(k.slice(0, 4) + '년 ' + (k.slice(4) === 'H1' ? '상반기' : '하반기') + ' 휴가는 ' + acfg.vacationDaysPerHalf + '일까지입니다. (사용 ' + (used[k] || 0) + '일, 신청 ' + perHalf[k] + '일)'));
+            }
+          }
+        }
+        var rec = { id: uid(), memberId: m.id, name: m.name, type: type, startDate: from, endDate: to, days: days, reason: reason, createdAt: nowISO() };
+        data.attLeaves.push(rec); write(); emit();
+        return Promise.resolve(clone(rec));
+      },
+
+      attDeleteLeave: function (id, opts) {
+        var l = data.attLeaves.filter(function (x) { return x.id === id; })[0];
+        if (!l) return Promise.reject(new Error('신청을 찾을 수 없습니다.'));
+        var s = readAttSession();
+        var own = s && s.memberId === l.memberId;
+        var admin = !!(opts && opts.admin);
+        if (!admin && !(own && l.startDate >= ymdLocal(new Date()))) return Promise.reject(new Error('본인의 시작 전 신청만 취소할 수 있습니다.'));
+        data.attLeaves = data.attLeaves.filter(function (x) { return x.id !== id; });
+        write(); emit(); return Promise.resolve();
+      },
+
+      /* ---------- 소모품 재고 ---------- */
+      invListManagers: function () { return Promise.resolve(data.invManagers.map(publicInvManager)); },
+
+      invSaveManager: function (m, opts) {
+        var nm = String(m.name || '').trim();
+        if (!nm) return Promise.reject(new Error('이름을 입력하세요.'));
+        var idx = data.invManagers.findIndex(function (x) { return x.id === m.id; });
+        var base = idx >= 0 ? data.invManagers[idx] : { id: uid(), createdAt: nowISO(), pinHash: '' };
+        var rec = Object.assign({}, base, { name: nm, area: String(m.area || '').trim() });
+        var p = (opts && opts.pin) ? hashPin(opts.pin).then(function (h) { rec.pinHash = h; }) : Promise.resolve();
+        return p.then(function () {
+          if (!rec.pinHash) throw new Error('담당자 PIN을 정해 주세요.');
+          if (idx >= 0) data.invManagers[idx] = rec; else data.invManagers.push(rec);
+          write(); emit();
+          return publicInvManager(rec);
+        });
+      },
+
+      invDeleteManager: function (id) {
+        data.invManagers = data.invManagers.filter(function (x) { return x.id !== id; });
+        write(); emit(); return Promise.resolve();
+      },
+
+      invVerifyManager: function (managerId, pin) {
+        var m = data.invManagers.filter(function (x) { return x.id === managerId; })[0];
+        if (!m) return Promise.resolve(false);
+        return hashPin(pin).then(function (h) { return h === m.pinHash; });
+      },
+
+      invListItems: function () { return Promise.resolve(clone(data.invItems)); },
+      invListMoves: function () { return Promise.resolve(clone(data.invMoves)); },
+
+      invSaveItem: function (item, creds) {
+        var m = data.invManagers.filter(function (x) { return x.id === (creds && creds.managerId); })[0];
+        if (!m) return Promise.reject(new Error('중간 관리자 확인이 필요합니다.'));
+        return hashPin(creds.pin).then(function (h) {
+          if (h !== m.pinHash) throw new Error('담당자 PIN이 올바르지 않습니다.');
+          var nm = String(item.name || '').trim();
+          if (!nm) throw new Error('품목명을 입력하세요.');
+          var qty = Math.max(0, Number(item.qty) || 0);
+          var price = Math.max(0, Math.round(Number(item.unitPrice) || 0));
+          var idx = data.invItems.findIndex(function (x) { return x.id === item.id; });
+          var now = nowISO();
+          if (idx < 0) {
+            var rec = { id: uid(), name: nm, category: item.category || '', unit: item.unit || '개', location: String(item.location || '').trim(), qty: qty, unitPrice: price,
+              minQty: Math.max(0, Number(item.minQty) || 0), note: String(item.note || '').trim(), active: item.active !== false, createdAt: now, updatedAt: now };
+            data.invItems.push(rec);
+            data.invMoves.unshift({ id: uid(), createdAt: now, itemId: rec.id, itemName: rec.name, location: rec.location, type: 'init', qty: qty, unitPrice: price, userName: m.name, note: '초기 보유량', stockAfter: qty });
+            write(); emit();
+            return clone(rec);
+          }
+          var cur = data.invItems[idx];
+          var delta = qty - cur.qty;
+          var upd = Object.assign({}, cur, { name: nm, category: item.category || '', unit: item.unit || cur.unit, location: String(item.location || '').trim(), qty: qty, unitPrice: price,
+            minQty: Math.max(0, Number(item.minQty) || 0), note: String(item.note || '').trim(), active: item.active !== false, updatedAt: now });
+          data.invItems[idx] = upd;
+          if (delta !== 0) data.invMoves.unshift({ id: uid(), createdAt: now, itemId: upd.id, itemName: upd.name, location: upd.location, type: 'adjust', qty: delta, unitPrice: price, userName: m.name, note: String(item.adjustNote || '재고 조정').trim(), stockAfter: qty });
+          write(); emit();
+          return clone(upd);
+        });
+      },
+
+      invDeleteItem: function (id, creds) {
+        var m = data.invManagers.filter(function (x) { return x.id === (creds && creds.managerId); })[0];
+        if (!m) return Promise.reject(new Error('중간 관리자 확인이 필요합니다.'));
+        return hashPin(creds.pin).then(function (h) {
+          if (h !== m.pinHash) throw new Error('담당자 PIN이 올바르지 않습니다.');
+          if (data.invMoves.some(function (mv) { return mv.itemId === id && mv.type === 'out'; })) throw new Error('소모 기록이 있는 품목은 삭제할 수 없습니다. 사용 중지로 바꾸세요.');
+          data.invItems = data.invItems.filter(function (x) { return x.id !== id; });
+          data.invMoves = data.invMoves.filter(function (x) { return x.itemId !== id; });
+          write(); emit();
+        });
+      },
+
+      invRestock: function (itemId, qty, unitPrice, note, creds) {
+        var m = data.invManagers.filter(function (x) { return x.id === (creds && creds.managerId); })[0];
+        if (!m) return Promise.reject(new Error('중간 관리자 확인이 필요합니다.'));
+        return hashPin(creds.pin).then(function (h) {
+          if (h !== m.pinHash) throw new Error('담당자 PIN이 올바르지 않습니다.');
+          var it = data.invItems.filter(function (x) { return x.id === itemId; })[0];
+          if (!it) throw new Error('품목을 찾을 수 없습니다.');
+          var q = Number(qty) || 0;
+          if (q <= 0) throw new Error('입고 수량은 0보다 커야 합니다.');
+          var price = Math.max(0, Math.round(Number(unitPrice) || it.unitPrice || 0));
+          it.qty += q; it.unitPrice = price; it.updatedAt = nowISO();
+          data.invMoves.unshift({ id: uid(), createdAt: nowISO(), itemId: it.id, itemName: it.name, location: it.location, type: 'in', qty: q, unitPrice: price, userName: m.name, note: String(note || '').trim(), stockAfter: it.qty });
+          write(); emit();
+          return clone(it);
+        });
+      },
+
+      invConsume: function (itemId, qty, note) {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var it = data.invItems.filter(function (x) { return x.id === itemId; })[0];
+        if (!it || it.active === false) return Promise.reject(new Error('소모 처리할 수 없는 품목입니다.'));
+        var q = Number(qty) || 0;
+        if (q <= 0) return Promise.reject(new Error('수량은 0보다 커야 합니다.'));
+        if (q > it.qty) return Promise.reject(new Error('재고(' + it.qty + it.unit + ')보다 많습니다. 담당자에게 알려주세요.'));
+        it.qty -= q; it.updatedAt = nowISO();
+        var mv = { id: uid(), createdAt: nowISO(), itemId: it.id, itemName: it.name, location: it.location, type: 'out', qty: q, unitPrice: it.unitPrice, userName: session.user.name, note: String(note || '').trim(), stockAfter: it.qty };
+        data.invMoves.unshift(mv);
+        write(); emit();
+        return Promise.resolve(clone(mv));
+      },
+
       onChange: function (cb) {
         listeners.push(cb);
         return function () { listeners = listeners.filter(function (x) { return x !== cb; }); };
@@ -397,6 +927,34 @@
     };
   }
 
+  function toEquipment(row, users) {
+    return { id: row.id, name: row.name, location: row.location || '', managerName: row.manager_name || '', description: row.description || '', rules: row.rules || '',
+      color: row.color || '#004191', active: row.active !== false, createdAt: row.created_at, hasManagerPin: true, users: users || [] };
+  }
+  function fromEquipment(eq) {
+    var out = { name: eq.name, location: eq.location || '', manager_name: eq.managerName || '', description: eq.description || '', rules: eq.rules || '', color: eq.color || '#004191', active: eq.active !== false };
+    if (eq.id) out.id = eq.id;
+    return out;
+  }
+  function toEqUser(row) { return { id: row.id, name: row.name, grantedAt: row.granted_at, grantedBy: row.granted_by || '' }; }
+  function toReservation(row) {
+    return { id: row.id, createdAt: row.created_at, equipmentId: row.equipment_id, userId: row.user_id, userName: row.user_name || '', start: row.start_at, end: row.end_at,
+      purpose: row.purpose || '', status: row.status, logId: row.log_id || null, cancelledAt: row.cancelled_at || null, cancelledBy: row.cancelled_by || null };
+  }
+  function toUsageLog(row) {
+    return { id: row.id, createdAt: row.created_at, reservationId: row.reservation_id, equipmentId: row.equipment_id, userId: row.user_id, userName: row.user_name || '',
+      usedStart: row.used_start, usedEnd: row.used_end, condition: row.condition || 'normal', content: row.content || '', issues: row.issues || '', waived: !!row.waived, waivedBy: row.waived_by || null };
+  }
+
+  function toInvItem(r) {
+    return { id: r.id, name: r.name, category: r.category || '', unit: r.unit || '개', location: r.location || '', qty: Number(r.qty) || 0, unitPrice: Number(r.unit_price) || 0,
+      minQty: Number(r.min_qty) || 0, note: r.note || '', active: r.active !== false, createdAt: r.created_at, updatedAt: r.updated_at };
+  }
+  function toInvMove(r) {
+    return { id: r.id, createdAt: r.created_at, itemId: r.item_id, itemName: r.item_name || '', location: r.location || '', type: r.type, qty: Number(r.qty) || 0,
+      unitPrice: Number(r.unit_price) || 0, userName: r.user_name || '', note: r.note || '', stockAfter: Number(r.stock_after) || 0 };
+  }
+
   function fromReviewPatch(patch) {
     var map = {
       title: 'title', purpose: 'purpose', vendor: 'vendor', category: 'category', items: 'items', amount: 'amount', note: 'note', pinHash: 'pin_hash',
@@ -455,6 +1013,7 @@
             .on('postgres_changes', { event: '*', schema: 'public', table: 'requests' }, emit)
             .on('postgres_changes', { event: '*', schema: 'public', table: 'projects' }, emit)
             .on('postgres_changes', { event: '*', schema: 'public', table: 'reviews' }, emit)
+            .on('postgres_changes', { event: '*', schema: 'public', table: 'reservations' }, emit)
             .subscribe();
         });
       },
@@ -551,6 +1110,219 @@
         if (!u) return Promise.reject(new Error('로그인이 필요합니다.'));
         var row = { exported_by: u.id, exported_by_name: u.name, purpose: log.purpose || '', format: log.format || 'csv', count: log.count || 0, total_amount: Math.round(Number(log.totalAmount) || 0), filter: log.filter || {}, rows: log.rows || [] };
         return client.from('export_logs').insert(row).select().single().then(unwrap).then(toExport);
+      },
+
+      /* ---------- 장비 예약 (검증은 모두 서버 함수에서) ---------- */
+      listEquipment: function () {
+        var admin = !!(profile && profile.is_admin);
+        var cols = 'id, created_at, name, location, manager_name, description, rules, color, active';
+        return Promise.all([
+          client.from(admin ? 'equipment' : 'equipment_public').select(cols).order('created_at', { ascending: true }).then(unwrap),
+          client.from('equipment_users_public').select('*').order('granted_at', { ascending: true }).then(unwrap)
+        ]).then(function (res) {
+          var users = {};
+          res[1].forEach(function (u) { (users[u.equipment_id] = users[u.equipment_id] || []).push(toEqUser(u)); });
+          return res[0].map(function (row) { return toEquipment(row, users[row.id] || []); });
+        });
+      },
+
+      saveEquipment: function (eq, opts) {
+        var row = fromEquipment(eq);
+        var p = (opts && opts.managerPin) ? hashPin(opts.managerPin).then(function (h) { row.manager_pin_hash = h; }) : Promise.resolve();
+        return p.then(function () {
+          return client.from('equipment').upsert(row).select('id, created_at, name, location, manager_name, description, rules, color, active').single().then(unwrap)
+            .then(function (r) { return toEquipment(r, eq.users || []); });
+        });
+      },
+
+      deleteEquipment: function (id) {
+        return client.from('equipment').delete().eq('id', id).then(unwrap).then(function () {});
+      },
+
+      verifyManager: function (equipmentId, pin) {
+        return client.rpc('verify_equipment_manager', { p_equipment_id: equipmentId, p_pin: String(pin) }).then(unwrap).then(function (v) { return v === true; });
+      },
+
+      grantUser: function (equipmentId, managerPin, name, userPin) {
+        return client.rpc('grant_equipment_user', { p_equipment_id: equipmentId, p_manager_pin: String(managerPin), p_name: String(name || '').trim(), p_user_pin: String(userPin) })
+          .then(unwrap).then(function (rows) { return rows && rows.length ? toEqUser(rows[0]) : null; });
+      },
+
+      revokeUser: function (equipmentId, managerPin, userId) {
+        return client.rpc('revoke_equipment_user', { p_equipment_id: equipmentId, p_manager_pin: String(managerPin), p_user_id: userId }).then(unwrap).then(function () {});
+      },
+
+      listReservations: function () {
+        return client.from('reservations').select('*').order('start_at', { ascending: false }).then(unwrap).then(function (rows) { return rows.map(toReservation); });
+      },
+
+      listUsageLogs: function () {
+        return client.from('usage_logs').select('*').order('created_at', { ascending: false }).then(unwrap).then(function (rows) { return rows.map(toUsageLog); });
+      },
+
+      createReservation: function (r) {
+        return client.rpc('create_reservation', { p_equipment_id: r.equipmentId, p_user_pin: String(r.userPin || ''), p_start: r.start, p_end: r.end, p_purpose: String(r.purpose || '').trim() })
+          .then(unwrap).then(function (rows) { return rows && rows.length ? toReservation(rows[0]) : null; });
+      },
+
+      cancelReservation: function (id, opts) {
+        return client.rpc('cancel_reservation', { p_reservation_id: id, p_manager_pin: opts && opts.managerPin ? String(opts.managerPin) : null })
+          .then(unwrap).then(function (rows) { return rows && rows.length ? toReservation(rows[0]) : null; });
+      },
+
+      createUsageLog: function (log) {
+        return client.rpc('create_usage_log', { p_reservation_id: log.reservationId, p_used_start: log.usedStart || null, p_used_end: log.usedEnd || null,
+          p_condition: log.condition === 'issue' ? 'issue' : 'normal', p_content: String(log.content || '').trim(), p_issues: String(log.issues || '').trim() })
+          .then(unwrap).then(function (rows) { return rows && rows.length ? toUsageLog(rows[0]) : null; });
+      },
+
+      waiveUsageLog: function (reservationId, managerPin, note) {
+        return client.rpc('waive_usage_log', { p_reservation_id: reservationId, p_manager_pin: String(managerPin), p_note: String(note || '').trim() })
+          .then(unwrap).then(function (rows) { return rows && rows.length ? toUsageLog(rows[0]) : null; });
+      },
+
+      /* ---------- 출석 (검증은 서버 함수, 관리자 편집은 RLS) ---------- */
+      attSession: function () { return readAttSession(); },
+      attLogout: function () { writeAttSession(null); return Promise.resolve(); },
+
+      attLogin: function (name, pin) {
+        return client.rpc('att_login', { p_name: String(name || '').trim(), p_pin: String(pin || '') }).then(unwrap).then(function (rows) {
+          var m = rows && rows.length ? rows[0] : null;
+          if (!m) throw new Error('로그인에 실패했습니다.');
+          writeAttSession({ memberId: m.id, name: m.name, pin: String(pin), ts: Date.now() });
+          return { id: m.id, name: m.name, active: m.active !== false, createdAt: m.created_at };
+        });
+      },
+
+      attChangePin: function (oldPin, newPin) {
+        var s = readAttSession(); if (!s) return Promise.reject(new Error('로그인이 필요합니다.'));
+        return client.rpc('att_change_pin', { p_old: String(oldPin || ''), p_new: String(newPin || '') }).then(unwrap).then(function () {
+          writeAttSession(Object.assign({}, s, { pin: String(newPin) }));
+        });
+      },
+
+      attListMembers: function () {
+        return client.from('attendance_members_public').select('*').order('name').then(unwrap).then(function (rows) {
+          return rows.map(function (r) { return { id: r.id, name: r.name, active: r.active !== false, createdAt: r.created_at }; });
+        });
+      },
+
+      attSaveMember: function (m, opts) {
+        var row = { name: String(m.name || '').trim(), name_key: nameKey(m.name), active: m.active !== false };
+        if (m.id) row.id = m.id;
+        var p = (opts && opts.pin) ? hashPin(opts.pin).then(function (h) { row.pin_hash = h; }) : Promise.resolve();
+        return p.then(function () {
+          if (!m.id && !row.pin_hash) throw new Error('초기 PIN을 정해 주세요.');
+          return client.from('attendance_members').upsert(row).select('id, name, active, created_at').single().then(unwrap);
+        }).then(function (r) { return { id: r.id, name: r.name, active: r.active !== false, createdAt: r.created_at }; });
+      },
+
+      attDeleteMember: function (id) { return client.from('attendance_members').delete().eq('id', id).then(unwrap).then(function () {}); },
+
+      attListRecords: function () {
+        return client.from('attendance_records').select('*').order('date', { ascending: false }).then(unwrap).then(function (rows) {
+          return rows.map(function (r) { return { id: r.id, memberId: r.member_id, name: r.name, date: r.date, status: r.status, checkInAt: r.check_in_at, reason: r.reason || '', createdAt: r.created_at, editedBy: r.edited_by || null }; });
+        });
+      },
+
+      attListLeaves: function () {
+        return client.from('attendance_leaves').select('*').order('start_date', { ascending: false }).then(unwrap).then(function (rows) {
+          return rows.map(function (l) { return { id: l.id, memberId: l.member_id, name: l.name, type: l.type, startDate: l.start_date, endDate: l.end_date, days: Number(l.days) || 0, reason: l.reason || '', createdAt: l.created_at }; });
+        });
+      },
+
+      attListHolidays: function () {
+        return client.from('attendance_holidays').select('*').then(unwrap).then(function (rows) {
+          var out = {}; rows.forEach(function (h) { out[h.date] = h.label; }); return out;
+        });
+      },
+
+      attSaveHolidays: function (obj) {
+        var rows = Object.keys(obj || {}).map(function (d) { return { date: d, label: obj[d] }; });
+        return client.rpc('att_set_holidays', { p_holidays: rows }).then(unwrap).then(function () {});
+      },
+
+      attCheckIn: function (reason) {
+        var s = readAttSession(); if (!s) return Promise.reject(new Error('로그인이 필요합니다.'));
+        return client.rpc('att_check_in', { p_pin: String(s.pin), p_reason: String(reason || '').trim() }).then(unwrap).then(function (rows) {
+          var r = rows && rows.length ? rows[0] : null;
+          if (!r) throw new Error('출석 체크에 실패했습니다.');
+          return { id: r.id, memberId: r.member_id, name: r.name, date: r.date, status: r.status, checkInAt: r.check_in_at, reason: r.reason || '', createdAt: r.created_at };
+        });
+      },
+
+      attUpdateRecord: function (id, patch) {
+        var row = {}; if (patch.status) row.status = patch.status; if (patch.reason !== undefined) row.reason = patch.reason;
+        return client.from('attendance_records').update(row).eq('id', id).select().single().then(unwrap);
+      },
+
+      attAdminSetDay: function (memberId, date, status, reason) {
+        return client.from('attendance_records').delete().eq('member_id', memberId).eq('date', date).then(unwrap).then(function () {
+          if (!status || status === 'absent') return;
+          return client.from('attendance_members_public').select('name').eq('id', memberId).single().then(unwrap).then(function (m) {
+            var u = currentUser();
+            return client.from('attendance_records').insert({ member_id: memberId, name: m.name, date: date, status: status, check_in_at: date + 'T09:00:00+09:00', reason: String(reason || '').trim(), edited_by: u ? u.name : '관리자' }).then(unwrap);
+          });
+        });
+      },
+
+      attRequestLeave: function (req) {
+        var s = readAttSession(); if (!s) return Promise.reject(new Error('로그인이 필요합니다.'));
+        return client.rpc('att_request_leave', { p_pin: String(s.pin), p_type: req.type === 'trip' ? 'trip' : 'vacation', p_start: req.startDate, p_end: req.endDate || req.startDate, p_reason: String(req.reason || '').trim() })
+          .then(unwrap).then(function (rows) {
+            var l = rows && rows.length ? rows[0] : null;
+            if (!l) throw new Error('신청에 실패했습니다.');
+            return { id: l.id, memberId: l.member_id, name: l.name, type: l.type, startDate: l.start_date, endDate: l.end_date, days: Number(l.days) || 0, reason: l.reason || '', createdAt: l.created_at };
+          });
+      },
+
+      attDeleteLeave: function (id, opts) {
+        if (opts && opts.admin) return client.from('attendance_leaves').delete().eq('id', id).then(unwrap).then(function () {});
+        var s = readAttSession(); if (!s) return Promise.reject(new Error('로그인이 필요합니다.'));
+        return client.rpc('att_delete_leave', { p_pin: String(s.pin), p_id: id }).then(unwrap).then(function () {});
+      },
+
+      /* ---------- 소모품 재고 ---------- */
+      invListManagers: function () {
+        return client.from('inventory_managers_public').select('*').order('name').then(unwrap).then(function (rows) {
+          return rows.map(function (r) { return { id: r.id, name: r.name, area: r.area || '', createdAt: r.created_at }; });
+        });
+      },
+      invSaveManager: function (m, opts) {
+        var row = { name: String(m.name || '').trim(), area: String(m.area || '').trim() };
+        if (m.id) row.id = m.id;
+        var p = (opts && opts.pin) ? hashPin(opts.pin).then(function (h) { row.pin_hash = h; }) : Promise.resolve();
+        return p.then(function () {
+          if (!m.id && !row.pin_hash) throw new Error('담당자 PIN을 정해 주세요.');
+          return client.from('inventory_managers').upsert(row).select('id, name, area, created_at').single().then(unwrap);
+        }).then(function (r) { return { id: r.id, name: r.name, area: r.area || '', createdAt: r.created_at }; });
+      },
+      invDeleteManager: function (id) { return client.from('inventory_managers').delete().eq('id', id).then(unwrap).then(function () {}); },
+      invVerifyManager: function (managerId, pin) {
+        return client.rpc('inv_verify_manager', { p_manager_id: managerId, p_pin: String(pin) }).then(unwrap).then(function (v) { return v === true; });
+      },
+      invListItems: function () {
+        return client.from('inventory_items').select('*').order('location').order('name').then(unwrap).then(function (rows) { return rows.map(toInvItem); });
+      },
+      invListMoves: function () {
+        return client.from('inventory_moves').select('*').order('created_at', { ascending: false }).then(unwrap).then(function (rows) { return rows.map(toInvMove); });
+      },
+      invSaveItem: function (item, creds) {
+        return client.rpc('inv_save_item', { p_manager_id: creds.managerId, p_pin: String(creds.pin), p_item: {
+          id: item.id || null, name: item.name, category: item.category || '', unit: item.unit || '개', location: item.location || '', qty: Number(item.qty) || 0,
+          unit_price: Math.round(Number(item.unitPrice) || 0), min_qty: Number(item.minQty) || 0, note: item.note || '', active: item.active !== false, adjust_note: item.adjustNote || ''
+        } }).then(unwrap).then(function (rows) { return rows && rows.length ? toInvItem(rows[0]) : null; });
+      },
+      invDeleteItem: function (id, creds) {
+        return client.rpc('inv_delete_item', { p_manager_id: creds.managerId, p_pin: String(creds.pin), p_item_id: id }).then(unwrap).then(function () {});
+      },
+      invRestock: function (itemId, qty, unitPrice, note, creds) {
+        return client.rpc('inv_restock', { p_manager_id: creds.managerId, p_pin: String(creds.pin), p_item_id: itemId, p_qty: Number(qty) || 0, p_unit_price: Math.round(Number(unitPrice) || 0), p_note: String(note || '').trim() })
+          .then(unwrap).then(function (rows) { return rows && rows.length ? toInvItem(rows[0]) : null; });
+      },
+      invConsume: function (itemId, qty, note) {
+        return client.rpc('inv_consume', { p_item_id: itemId, p_qty: Number(qty) || 0, p_note: String(note || '').trim() })
+          .then(unwrap).then(function (rows) { return rows && rows.length ? toInvMove(rows[0]) : null; });
       },
 
       onChange: function (cb) {
