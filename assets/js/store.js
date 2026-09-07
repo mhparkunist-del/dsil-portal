@@ -56,6 +56,7 @@
   var DATA_KEY = 'dsil-budget-v1';
   var SESSION_KEY = 'dsil-budget-session-v1';
   var DEMO_PIN_HASH = '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4'; /* sha256("1234") */
+  var SUPER_ADMIN = { id: 'admin-1', name: '관리자', seedPin: '0000' };                          /* 슈퍼계정: 관리자 / 0000 */
 
   function uid() {
     if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -84,7 +85,11 @@
   }
   function nameKey(s) { return String(s || '').replace(/\s+/g, '').toLowerCase(); }
   function isSameUser(r, user) { return !!user && (r.userId === user.id || nameKey(r.userName) === nameKey(user.name)); }
-  function publicUser(u) { return { id: u.id, name: u.name, grantedAt: u.grantedAt, grantedBy: u.grantedBy || '' }; }
+  var EQ_GRADES = ['training', 'test', 'user', 'super'];
+  function normGrade(g) { return EQ_GRADES.indexOf(g) >= 0 ? g : 'training'; }
+  function canReserveGrade(g) { return g === 'user' || g === 'super'; }
+  function gradeLabel(g) { return { training: '교육', test: '유저 테스트 대기', user: '유저', super: '슈퍼유저' }[g] || g; }
+  function publicUser(u) { return { id: u.id, name: u.name, grade: normGrade(u.grade), grantedAt: u.grantedAt, grantedBy: u.grantedBy || '' }; }
   function publicEquipment(eq) {
     return { id: eq.id, name: eq.name, location: eq.location || '', managerName: eq.managerName || '', description: eq.description || '', rules: eq.rules || '',
       color: eq.color || '#004191', active: eq.active !== false, createdAt: eq.createdAt, hasManagerPin: !!eq.managerPinHash, users: (eq.users || []).map(publicUser) };
@@ -98,7 +103,7 @@
 
   /* ---------- 출석 공통 규칙 ---------- */
   var ATT_KEY = 'dsil-att-session-v1';
-  function attendanceCfg(cfg) { return Object.assign({ lateAfter: '09:00', closeAfter: '11:00', vacationDaysPerHalf: 2, selfRegister: true, holidays: {} }, cfg.attendance || {}); }
+  function attendanceCfg(cfg) { return Object.assign({ openAfter: '06:00', lateAfter: '09:00', closeAfter: '11:00', vacationDaysPerHalf: 2, selfRegister: true, holidays: {} }, cfg.attendance || {}); }
   function ymdLocal(d) { function p(n) { return String(n).padStart(2, '0'); } return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()); }
   function hmLocal(d) { function p(n) { return String(n).padStart(2, '0'); } return p(d.getHours()) + ':' + p(d.getMinutes()); }
   function isWeekend(dateStr) { var d = new Date(dateStr + 'T00:00:00'); var w = d.getDay(); return w === 0 || w === 6; }
@@ -140,9 +145,16 @@
     var r1 = uid(), r2 = uid(), r3 = uid(), r4 = uid(), r5 = uid(), r6 = uid();
     var l1 = uid();
     var demoUsers = function () {
-      return ['홍길동', '이영희', '박철수'].map(function (n) { return { id: uid(), name: n, pinHash: DEMO_PIN_HASH, grantedAt: daysAgo(60), grantedBy: '관리자' }; });
+      return [['홍길동', 'super'], ['이영희', 'user'], ['박철수', 'user'], ['김신입', 'training']].map(function (u) { return { id: uid(), name: u[0], grade: u[1], grantedAt: daysAgo(60), grantedBy: '관리자' }; });
     };
     return {
+      accounts: [
+        { id: SUPER_ADMIN.id, name: SUPER_ADMIN.name, pinHash: '', seedPin: SUPER_ADMIN.seedPin, role: 'admin', status: 'active', createdAt: daysAgo(400), approvedAt: daysAgo(400), approvedBy: '시스템' },
+        { id: 'demo-1', name: '홍길동', pinHash: DEMO_PIN_HASH, role: 'member', status: 'active', createdAt: daysAgo(300), approvedAt: daysAgo(300), approvedBy: '관리자' },
+        { id: 'demo-2', name: '이영희', pinHash: DEMO_PIN_HASH, role: 'member', status: 'active', createdAt: daysAgo(300), approvedAt: daysAgo(300), approvedBy: '관리자' },
+        { id: 'demo-3', name: '박철수', pinHash: DEMO_PIN_HASH, role: 'member', status: 'active', createdAt: daysAgo(300), approvedAt: daysAgo(300), approvedBy: '관리자' },
+        { id: 'demo-4', name: '김신입', pinHash: DEMO_PIN_HASH, role: 'member', status: 'pending', createdAt: daysAgo(1), approvedAt: null, approvedBy: null }
+      ],
       equipment: [
         { id: e1, name: '프로브 스테이션 (Keithley 2636B)', location: 'E3-3 2302호 측정실', managerName: '이영희', managerPinHash: DEMO_PIN_HASH, description: 'DC I-V, 저온 측정. 4개 매니퓰레이터.', rules: '사용 전 챔버 진공 확인\n텅스텐 팁 교체 시 로그에 기재\n1회 최대 4시간', color: '#004191', active: true, createdAt: daysAgo(200), users: demoUsers() },
         { id: e2, name: 'RF 스퍼터 증착기', location: 'E3-3 지하 클린룸', managerName: '박철수', managerPinHash: DEMO_PIN_HASH, description: '3-gun 스퍼터. 타겟 교체는 담당자에게.', rules: '베이킹 후 사용\n타겟 잔량 로그 필수', color: '#f76707', active: true, createdAt: daysAgo(200), users: demoUsers().slice(0, 2) },
@@ -262,7 +274,10 @@
     if (!Array.isArray(data.equipment)) data.equipment = [];
     if (!Array.isArray(data.reservations)) data.reservations = [];
     if (!Array.isArray(data.usageLogs)) data.usageLogs = [];
-    data.equipment.forEach(function (eq) { if (!Array.isArray(eq.users)) eq.users = []; });
+    data.equipment.forEach(function (eq) {
+      if (!Array.isArray(eq.users)) eq.users = [];
+      eq.users.forEach(function (u) { if (!u.grade) u.grade = 'user'; delete u.pinHash; }); /* 이전 버전: 사용자 PIN → 등급 */
+    });
     if (!Array.isArray(data.attMembers)) data.attMembers = [];
     if (!Array.isArray(data.attRecords)) data.attRecords = [];
     if (!Array.isArray(data.attLeaves)) data.attLeaves = [];
@@ -270,10 +285,15 @@
     if (!Array.isArray(data.invManagers)) data.invManagers = [];
     if (!Array.isArray(data.invItems)) data.invItems = [];
     if (!Array.isArray(data.invMoves)) data.invMoves = [];
+    if (!Array.isArray(data.accounts)) data.accounts = [];
+    if (!data.accounts.some(function (a) { return a.role === 'admin'; })) {
+      data.accounts.unshift({ id: SUPER_ADMIN.id, name: SUPER_ADMIN.name, pinHash: '', seedPin: SUPER_ADMIN.seedPin, role: 'admin', status: 'active', createdAt: nowISO(), approvedAt: nowISO(), approvedBy: '시스템' });
+    }
     return data;
   }
 
   function publicInvManager(m) { return { id: m.id, name: m.name, area: m.area || '', createdAt: m.createdAt }; }
+  function publicAccount(a) { return { id: a.id, name: a.name, role: a.role || 'member', status: a.status || 'pending', createdAt: a.createdAt, approvedAt: a.approvedAt || null, approvedBy: a.approvedBy || null }; }
 
   function limitedReview(rv) {
     return { id: rv.id, createdAt: rv.createdAt, requesterId: rv.requesterId, requesterName: rv.requesterName, title: rv.title, status: rv.status, processedAt: rv.processedAt, limited: true };
@@ -304,9 +324,21 @@
       try { localStorage.setItem(DATA_KEY, JSON.stringify(data)); } catch (e) { console.warn('localStorage write failed', e); }
     }
 
+    function accountById(id) { return data.accounts.filter(function (a) { return a.id === id; })[0] || null; }
+
+    /* 시드 계정의 평문 PIN 을 해시로 바꿔 저장 (관리자 / 0000) */
+    function ensureSeedHashes() {
+      var todo = data.accounts.filter(function (a) { return !a.pinHash && a.seedPin; });
+      if (!todo.length) return Promise.resolve();
+      return Promise.all(todo.map(function (a) { return hashPin(a.seedPin).then(function (h) { a.pinHash = h; delete a.seedPin; }); })).then(function () { write(); });
+    }
+
     function readSession() {
       try { session = JSON.parse(localStorage.getItem(SESSION_KEY) || 'null'); } catch (e) { session = null; }
-      if (session && session.user) session.isAdmin = true; /* local 모드: PIN 이 관리자 게이트 */
+      if (!session || !session.user) { session = null; return; }
+      var acc = accountById(session.user.id);
+      if (!acc || acc.status !== 'active') { session = null; writeSession(); return; } /* 이름만으로 만든 옛 세션·미승인 계정은 무효 */
+      session = { user: { id: acc.id, name: acc.name, email: '' }, isAdmin: acc.role === 'admin', status: 'active' };
     }
 
     function writeSession() {
@@ -326,20 +358,90 @@
     return {
       mode: 'local',
 
-      init: function () { read(); readSession(); return Promise.resolve(); },
+      init: function () { read(); return ensureSeedHashes().then(function () { readSession(); }); },
 
       getSession: function () { return session ? clone(session) : null; },
 
+      /* 포털 로그인: 이름 + PIN. 승인된(active) 계정만 통과 */
       signIn: function (payload) {
         var name = (payload && payload.name || '').trim();
+        var pin = String(payload && payload.pin || '');
         if (!name) return Promise.reject(new Error('이름을 입력하세요.'));
-        session = { user: { id: 'local-' + name, name: name, email: '' }, isAdmin: true };
-        writeSession();
-        emit();
-        return Promise.resolve(clone(session));
+        var acc = data.accounts.filter(function (a) { return nameKey(a.name) === nameKey(name); })[0];
+        if (!acc) return Promise.reject(new Error('등록되지 않은 이름입니다. 회원가입을 신청하세요.'));
+        if (acc.status === 'pending') return Promise.reject(new Error('관리자 승인 대기 중입니다. 승인 후 로그인할 수 있습니다.'));
+        if (acc.status === 'rejected') return Promise.reject(new Error('가입 신청이 거절되었습니다. 관리자에게 문의하세요.'));
+        if (acc.status === 'disabled') return Promise.reject(new Error('사용이 중지된 계정입니다.'));
+        return hashPin(pin).then(function (h) {
+          if (h !== acc.pinHash) throw new Error('PIN이 올바르지 않습니다.');
+          session = { user: { id: acc.id, name: acc.name, email: '' }, isAdmin: acc.role === 'admin', status: 'active' };
+          writeSession(); emit();
+          return clone(session);
+        });
+      },
+
+      /* 회원가입 신청: 관리자가 승인해야 로그인 가능 */
+      signUp: function (payload) {
+        var name = (payload && payload.name || '').trim();
+        var pin = String(payload && payload.pin || '');
+        if (!name) return Promise.reject(new Error('이름을 입력하세요.'));
+        if (!/^\d{4,8}$/.test(pin)) return Promise.reject(new Error('PIN은 숫자 4~8자리입니다.'));
+        var dup = data.accounts.filter(function (a) { return nameKey(a.name) === nameKey(name); })[0];
+        if (dup) return Promise.reject(new Error(dup.status === 'pending' ? '이미 승인 대기 중인 이름입니다.' : '이미 등록된 이름입니다. 로그인하세요.'));
+        return hashPin(pin).then(function (h) {
+          var acc = { id: uid(), name: name, pinHash: h, role: 'member', status: 'pending', createdAt: nowISO(), approvedAt: null, approvedBy: null };
+          data.accounts.push(acc); write(); emit();
+          return publicAccount(acc);
+        });
       },
 
       signOut: function () { session = null; writeSession(); emit(); return Promise.resolve(); },
+
+      /* ---------- 계정 관리 (관리자) ---------- */
+      listAccounts: function () { return Promise.resolve(data.accounts.map(publicAccount)); },
+
+      approveAccount: function (id) {
+        var a = accountById(id); if (!a) return Promise.reject(new Error('계정을 찾을 수 없습니다.'));
+        a.status = 'active'; a.approvedAt = nowISO(); a.approvedBy = session ? session.user.name : '관리자';
+        write(); emit(); return Promise.resolve(publicAccount(a));
+      },
+
+      rejectAccount: function (id) {
+        var a = accountById(id); if (!a) return Promise.reject(new Error('계정을 찾을 수 없습니다.'));
+        if (a.status === 'pending') data.accounts = data.accounts.filter(function (x) { return x.id !== id; });
+        else a.status = 'rejected';
+        write(); emit(); return Promise.resolve();
+      },
+
+      setAccountStatus: function (id, status) {
+        var a = accountById(id); if (!a) return Promise.reject(new Error('계정을 찾을 수 없습니다.'));
+        if (a.role === 'admin' && status !== 'active' && data.accounts.filter(function (x) { return x.role === 'admin' && x.status === 'active'; }).length <= 1) return Promise.reject(new Error('마지막 관리자 계정은 중지할 수 없습니다.'));
+        a.status = status; write(); emit(); return Promise.resolve(publicAccount(a));
+      },
+
+      setAccountRole: function (id, role) {
+        var a = accountById(id); if (!a) return Promise.reject(new Error('계정을 찾을 수 없습니다.'));
+        if (a.role === 'admin' && role !== 'admin' && data.accounts.filter(function (x) { return x.role === 'admin' && x.status === 'active'; }).length <= 1) return Promise.reject(new Error('마지막 관리자 계정의 권한은 내릴 수 없습니다.'));
+        a.role = role === 'admin' ? 'admin' : 'member'; write(); emit();
+        if (session && session.user.id === id) { session.isAdmin = a.role === 'admin'; writeSession(); }
+        return Promise.resolve(publicAccount(a));
+      },
+
+      resetAccountPin: function (id, pin) {
+        var a = accountById(id); if (!a) return Promise.reject(new Error('계정을 찾을 수 없습니다.'));
+        if (!/^\d{4,8}$/.test(String(pin || ''))) return Promise.reject(new Error('PIN은 숫자 4~8자리입니다.'));
+        return hashPin(pin).then(function (h) { a.pinHash = h; write(); emit(); return publicAccount(a); });
+      },
+
+      changeMyPin: function (oldPin, newPin) {
+        if (!session) return Promise.reject(new Error('로그인이 필요합니다.'));
+        var a = accountById(session.user.id); if (!a) return Promise.reject(new Error('계정을 찾을 수 없습니다.'));
+        if (!/^\d{4,8}$/.test(String(newPin || ''))) return Promise.reject(new Error('새 PIN은 숫자 4~8자리입니다.'));
+        return Promise.all([hashPin(oldPin), hashPin(newPin)]).then(function (hs) {
+          if (hs[0] !== a.pinHash) throw new Error('현재 PIN이 올바르지 않습니다.');
+          a.pinHash = hs[1]; write(); emit();
+        });
+      },
 
       verifyAdminPin: function (pin) { return Promise.resolve(String(pin) === String(cfg.adminPin)); },
 
@@ -474,18 +576,32 @@
         return hashPin(pin).then(function (h) { return h === eq.managerPinHash; });
       },
 
-      grantUser: function (equipmentId, managerPin, name, userPin) {
+      /* 사용자 등록: 이름 + 등급(교육/유저 테스트 대기/유저/슈퍼유저). 같은 이름이면 등급 변경 */
+      grantUser: function (equipmentId, managerPin, name, grade) {
         var eq = data.equipment.filter(function (x) { return x.id === equipmentId; })[0];
         if (!eq) return Promise.reject(new Error('장비를 찾을 수 없습니다.'));
         var nm = String(name || '').trim();
         if (!nm) return Promise.reject(new Error('이름을 입력하세요.'));
-        return Promise.all([hashPin(managerPin), hashPin(userPin)]).then(function (hs) {
-          if (hs[0] !== eq.managerPinHash) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
+        return hashPin(managerPin).then(function (h) {
+          if (h !== eq.managerPinHash) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
           var key = nameKey(nm);
           var u = eq.users.filter(function (x) { return nameKey(x.name) === key; })[0];
           var by = session ? session.user.name : '';
-          if (u) { u.pinHash = hs[1]; u.name = nm; u.grantedAt = nowISO(); u.grantedBy = by; }
-          else { u = { id: uid(), name: nm, pinHash: hs[1], grantedAt: nowISO(), grantedBy: by }; eq.users.push(u); }
+          if (u) { u.grade = normGrade(grade); u.name = nm; u.grantedAt = nowISO(); u.grantedBy = by; }
+          else { u = { id: uid(), name: nm, grade: normGrade(grade), grantedAt: nowISO(), grantedBy: by }; eq.users.push(u); }
+          write(); emit();
+          return publicUser(u);
+        });
+      },
+
+      setUserGrade: function (equipmentId, managerPin, userId, grade) {
+        var eq = data.equipment.filter(function (x) { return x.id === equipmentId; })[0];
+        if (!eq) return Promise.reject(new Error('장비를 찾을 수 없습니다.'));
+        return hashPin(managerPin).then(function (h) {
+          if (h !== eq.managerPinHash) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
+          var u = eq.users.filter(function (x) { return x.id === userId; })[0];
+          if (!u) throw new Error('사용자를 찾을 수 없습니다.');
+          u.grade = normGrade(grade); u.grantedAt = nowISO(); u.grantedBy = session ? session.user.name : '';
           write(); emit();
           return publicUser(u);
         });
@@ -504,6 +620,7 @@
       listReservations: function () { return Promise.resolve(clone(data.reservations)); },
       listUsageLogs: function () { return Promise.resolve(clone(data.usageLogs)); },
 
+      /* 예약: 담당자가 유저/슈퍼유저 등급으로 등록한 사람만. PIN 없음 */
       createReservation: function (r) {
         var err = needSession(); if (err) return Promise.reject(err);
         var ecfg = equipmentCfg(cfg);
@@ -511,9 +628,9 @@
         if (!eq || eq.active === false) return Promise.reject(new Error('예약할 수 없는 장비입니다.'));
         var me = session.user;
         var u = eq.users.filter(function (x) { return nameKey(x.name) === nameKey(me.name); })[0];
-        if (!u) return Promise.reject(new Error('이 장비의 사용 권한이 없습니다. 장비 담당자(' + (eq.managerName || '미지정') + ')에게 사용자 PIN을 받으세요.'));
-        return hashPin(r.userPin).then(function (h) {
-          if (h !== u.pinHash) throw new Error('사용자 PIN이 올바르지 않습니다.');
+        if (!u) return Promise.reject(new Error('이 장비의 사용자로 등록되어 있지 않습니다. 장비 담당자(' + (eq.managerName || '미지정') + ')에게 등록을 요청하세요.'));
+        if (!canReserveGrade(normGrade(u.grade))) return Promise.reject(new Error('현재 등급이 "' + gradeLabel(normGrade(u.grade)) + '"라 예약할 수 없습니다. 담당자에게 유저 승급을 요청하세요.'));
+        try {
           var start = new Date(r.start), end = new Date(r.end), now = new Date();
           if (isNaN(start) || isNaN(end) || end <= start) throw new Error('시작·종료 시각을 확인하세요.');
           if (end <= now) throw new Error('이미 지난 시간은 예약할 수 없습니다.');
@@ -527,7 +644,33 @@
             purpose: String(r.purpose || '').trim(), status: 'booked', logId: null, cancelledAt: null, cancelledBy: null };
           data.reservations.push(rec);
           write(); emit();
-          return clone(rec);
+          return Promise.resolve(clone(rec));
+        } catch (e) { return Promise.reject(e); }
+      },
+
+      /* 예약 일정 변경: 본인의 예정 예약, 또는 담당자 PIN */
+      updateReservation: function (id, patch, opts) {
+        var r = data.reservations.filter(function (x) { return x.id === id; })[0];
+        if (!r) return Promise.reject(new Error('예약을 찾을 수 없습니다.'));
+        if (r.status !== 'booked') return Promise.reject(new Error('취소된 예약은 변경할 수 없습니다.'));
+        var me = session ? session.user : null;
+        var ecfg = equipmentCfg(cfg);
+        var p;
+        if (me && isSameUser(r, me) && new Date(r.start) > new Date()) p = Promise.resolve(true);
+        else if (opts && opts.managerPin) { var eq = data.equipment.filter(function (x) { return x.id === r.equipmentId; })[0]; p = hashPin(opts.managerPin).then(function (h) { return !!eq && h === eq.managerPinHash; }); }
+        else p = Promise.resolve(false);
+        return p.then(function (ok) {
+          if (!ok) throw new Error('본인의 예정된 예약만 변경할 수 있습니다. 시작된 예약은 장비 담당자가 처리합니다.');
+          var start = new Date(patch.start || r.start), end = new Date(patch.end || r.end), now = new Date();
+          if (isNaN(start) || isNaN(end) || end <= start) throw new Error('시작·종료 시각을 확인하세요.');
+          if (end <= now) throw new Error('이미 지난 시간으로는 바꿀 수 없습니다.');
+          if ((end - start) / 3600000 > ecfg.maxHours) throw new Error('1회 예약은 최대 ' + ecfg.maxHours + '시간입니다.');
+          var clash = data.reservations.filter(function (x) { return x.id !== r.id && x.status === 'booked' && x.equipmentId === r.equipmentId && new Date(x.start) < end && new Date(x.end) > start; })[0];
+          if (clash) throw new Error('같은 시간에 ' + clash.userName + '님의 예약이 있습니다 (' + fmtRangeShort(clash) + ').');
+          r.start = start.toISOString(); r.end = end.toISOString();
+          if (patch.purpose !== undefined) r.purpose = String(patch.purpose || '').trim();
+          write(); emit();
+          return clone(r);
         });
       },
 
@@ -584,6 +727,17 @@
       /* ---------- 출석 ---------- */
       attSession: function () { return readAttSession(); },
       attLogout: function () { writeAttSession(null); return Promise.resolve(); },
+
+      /* 포털 로그인 계정으로 출석 구성원 자동 연결 (이름 기준, 없으면 생성) */
+      attLoginFromPortal: function () {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var key = nameKey(session.user.name);
+        var m = data.attMembers.filter(function (x) { return nameKey(x.name) === key; })[0];
+        if (!m) { m = { id: uid(), name: session.user.name, pinHash: '', active: true, createdAt: nowISO() }; data.attMembers.push(m); write(); emit(); }
+        if (m.active === false) return Promise.reject(new Error('출석 사용이 중지된 구성원입니다. 관리자에게 문의하세요.'));
+        writeAttSession({ memberId: m.id, name: m.name, pin: '', ts: Date.now() });
+        return Promise.resolve(publicMember(m));
+      },
 
       attLogin: function (name, pin) {
         var acfg = attendanceCfg(cfg);
@@ -662,6 +816,7 @@
         var leave = data.attLeaves.filter(function (l) { return l.memberId === m.id && l.startDate <= today && today <= l.endDate; })[0];
         if (leave) return Promise.reject(new Error('오늘은 ' + (leave.type === 'trip' ? '출장' : '휴가') + '으로 등록되어 있어 출석 체크를 하지 않습니다.'));
         if (data.attRecords.some(function (r) { return r.memberId === m.id && r.date === today; })) return Promise.reject(new Error('오늘은 이미 출석 체크를 했습니다.'));
+        if (hm < acfg.openAfter) return Promise.reject(new Error('출석 가능 시간은 ' + acfg.openAfter + ' ~ ' + acfg.closeAfter + ' 입니다.'));
         if (hm >= acfg.closeAfter) return Promise.reject(new Error(acfg.closeAfter + ' 이후에는 출석 체크를 할 수 없습니다. 오늘은 미기입(결근)으로 처리됩니다.'));
         var status = hm < acfg.lateAfter ? 'present' : (String(reason || '').trim() ? 'excused' : 'late');
         var rec = { id: uid(), memberId: m.id, name: m.name, date: today, status: status, checkInAt: now.toISOString(), reason: status === 'present' ? '' : String(reason || '').trim(), createdAt: now.toISOString() };
@@ -936,7 +1091,7 @@
     if (eq.id) out.id = eq.id;
     return out;
   }
-  function toEqUser(row) { return { id: row.id, name: row.name, grantedAt: row.granted_at, grantedBy: row.granted_by || '' }; }
+  function toEqUser(row) { return { id: row.id, name: row.name, grade: normGrade(row.grade), grantedAt: row.granted_at, grantedBy: row.granted_by || '' }; }
   function toReservation(row) {
     return { id: row.id, createdAt: row.created_at, equipmentId: row.equipment_id, userId: row.user_id, userName: row.user_name || '', start: row.start_at, end: row.end_at,
       purpose: row.purpose || '', status: row.status, logId: row.log_id || null, cancelledAt: row.cancelled_at || null, cancelledBy: row.cancelled_by || null };
@@ -1020,9 +1175,10 @@
 
       getSession: function () {
         if (!session) return null;
-        return { user: currentUser(), isAdmin: !!(profile && profile.is_admin) };
+        return { user: currentUser(), isAdmin: !!(profile && profile.is_admin), status: profile ? (profile.status || 'pending') : 'pending' };
       },
 
+      /* 공용 DB 모드: 이메일 magic link. 처음 로그인한 계정은 승인 대기(pending) 상태 */
       signIn: function (payload) {
         var email = (payload && payload.email || '').trim();
         if (!email) return Promise.reject(new Error('이메일을 입력하세요.'));
@@ -1031,8 +1187,21 @@
           options: { emailRedirectTo: window.location.href.split('#')[0], data: { name: (payload.name || '').trim() } }
         }).then(unwrap).then(function () { return { magicLinkSent: true }; });
       },
+      signUp: function (payload) { return this.signIn(payload); },
 
       signOut: function () { return client.auth.signOut().then(function () { session = null; profile = null; emit(); }); },
+
+      listAccounts: function () {
+        return client.from('profiles').select('*').order('created_at').then(unwrap).then(function (rows) {
+          return rows.map(function (p) { return { id: p.id, name: p.name || p.email, email: p.email, role: p.is_admin ? 'admin' : 'member', status: p.status || 'pending', createdAt: p.created_at, approvedAt: p.approved_at || null, approvedBy: p.approved_by || null }; });
+        });
+      },
+      approveAccount: function (id) { var u = currentUser(); return client.from('profiles').update({ status: 'active', approved_at: new Date().toISOString(), approved_by: u ? u.name : '' }).eq('id', id).then(unwrap).then(function () {}); },
+      rejectAccount: function (id) { return client.from('profiles').update({ status: 'rejected' }).eq('id', id).then(unwrap).then(function () {}); },
+      setAccountStatus: function (id, status) { return client.from('profiles').update({ status: status }).eq('id', id).then(unwrap).then(function () {}); },
+      setAccountRole: function (id, role) { return client.from('profiles').update({ is_admin: role === 'admin' }).eq('id', id).then(unwrap).then(function () {}); },
+      resetAccountPin: function () { return Promise.reject(new Error('공용 DB 모드는 이메일 링크로 로그인하므로 PIN이 없습니다.')); },
+      changeMyPin: function () { return Promise.reject(new Error('공용 DB 모드는 이메일 링크로 로그인하므로 PIN이 없습니다.')); },
 
       /* 진입 PIN 은 UX 게이트이며, 실제 권한은 profiles.is_admin + RLS 가 강제합니다. */
       verifyAdminPin: function (pin) {
@@ -1143,9 +1312,19 @@
         return client.rpc('verify_equipment_manager', { p_equipment_id: equipmentId, p_pin: String(pin) }).then(unwrap).then(function (v) { return v === true; });
       },
 
-      grantUser: function (equipmentId, managerPin, name, userPin) {
-        return client.rpc('grant_equipment_user', { p_equipment_id: equipmentId, p_manager_pin: String(managerPin), p_name: String(name || '').trim(), p_user_pin: String(userPin) })
+      grantUser: function (equipmentId, managerPin, name, grade) {
+        return client.rpc('grant_equipment_user', { p_equipment_id: equipmentId, p_manager_pin: String(managerPin), p_name: String(name || '').trim(), p_grade: normGrade(grade) })
           .then(unwrap).then(function (rows) { return rows && rows.length ? toEqUser(rows[0]) : null; });
+      },
+
+      setUserGrade: function (equipmentId, managerPin, userId, grade) {
+        return client.rpc('set_equipment_user_grade', { p_equipment_id: equipmentId, p_manager_pin: String(managerPin), p_user_id: userId, p_grade: normGrade(grade) })
+          .then(unwrap).then(function (rows) { return rows && rows.length ? toEqUser(rows[0]) : null; });
+      },
+
+      updateReservation: function (id, patch, opts) {
+        return client.rpc('update_reservation', { p_reservation_id: id, p_start: patch.start || null, p_end: patch.end || null, p_purpose: patch.purpose === undefined ? null : String(patch.purpose || '').trim(), p_manager_pin: opts && opts.managerPin ? String(opts.managerPin) : null })
+          .then(unwrap).then(function (rows) { return rows && rows.length ? toReservation(rows[0]) : null; });
       },
 
       revokeUser: function (equipmentId, managerPin, userId) {
@@ -1161,7 +1340,7 @@
       },
 
       createReservation: function (r) {
-        return client.rpc('create_reservation', { p_equipment_id: r.equipmentId, p_user_pin: String(r.userPin || ''), p_start: r.start, p_end: r.end, p_purpose: String(r.purpose || '').trim() })
+        return client.rpc('create_reservation', { p_equipment_id: r.equipmentId, p_start: r.start, p_end: r.end, p_purpose: String(r.purpose || '').trim() })
           .then(unwrap).then(function (rows) { return rows && rows.length ? toReservation(rows[0]) : null; });
       },
 
@@ -1185,21 +1364,17 @@
       attSession: function () { return readAttSession(); },
       attLogout: function () { writeAttSession(null); return Promise.resolve(); },
 
-      attLogin: function (name, pin) {
-        return client.rpc('att_login', { p_name: String(name || '').trim(), p_pin: String(pin || '') }).then(unwrap).then(function (rows) {
+      /* 포털(auth) 계정으로 출석 구성원 자동 연결 */
+      attLoginFromPortal: function () {
+        return client.rpc('att_login_portal').then(unwrap).then(function (rows) {
           var m = rows && rows.length ? rows[0] : null;
-          if (!m) throw new Error('로그인에 실패했습니다.');
-          writeAttSession({ memberId: m.id, name: m.name, pin: String(pin), ts: Date.now() });
+          if (!m) throw new Error('출석 구성원 연결에 실패했습니다.');
+          writeAttSession({ memberId: m.id, name: m.name, pin: '', ts: Date.now() });
           return { id: m.id, name: m.name, active: m.active !== false, createdAt: m.created_at };
         });
       },
-
-      attChangePin: function (oldPin, newPin) {
-        var s = readAttSession(); if (!s) return Promise.reject(new Error('로그인이 필요합니다.'));
-        return client.rpc('att_change_pin', { p_old: String(oldPin || ''), p_new: String(newPin || '') }).then(unwrap).then(function () {
-          writeAttSession(Object.assign({}, s, { pin: String(newPin) }));
-        });
-      },
+      attLogin: function () { return this.attLoginFromPortal(); },
+      attChangePin: function () { return Promise.reject(new Error('공용 DB 모드에서는 포털 계정으로 자동 연결되어 별도 PIN이 없습니다.')); },
 
       attListMembers: function () {
         return client.from('attendance_members_public').select('*').order('name').then(unwrap).then(function (rows) {
@@ -1244,7 +1419,7 @@
 
       attCheckIn: function (reason) {
         var s = readAttSession(); if (!s) return Promise.reject(new Error('로그인이 필요합니다.'));
-        return client.rpc('att_check_in', { p_pin: String(s.pin), p_reason: String(reason || '').trim() }).then(unwrap).then(function (rows) {
+        return client.rpc('att_check_in', { p_reason: String(reason || '').trim() }).then(unwrap).then(function (rows) {
           var r = rows && rows.length ? rows[0] : null;
           if (!r) throw new Error('출석 체크에 실패했습니다.');
           return { id: r.id, memberId: r.member_id, name: r.name, date: r.date, status: r.status, checkInAt: r.check_in_at, reason: r.reason || '', createdAt: r.created_at };
@@ -1268,7 +1443,7 @@
 
       attRequestLeave: function (req) {
         var s = readAttSession(); if (!s) return Promise.reject(new Error('로그인이 필요합니다.'));
-        return client.rpc('att_request_leave', { p_pin: String(s.pin), p_type: req.type === 'trip' ? 'trip' : 'vacation', p_start: req.startDate, p_end: req.endDate || req.startDate, p_reason: String(req.reason || '').trim() })
+        return client.rpc('att_request_leave', { p_type: req.type === 'trip' ? 'trip' : 'vacation', p_start: req.startDate, p_end: req.endDate || req.startDate, p_reason: String(req.reason || '').trim() })
           .then(unwrap).then(function (rows) {
             var l = rows && rows.length ? rows[0] : null;
             if (!l) throw new Error('신청에 실패했습니다.');
@@ -1279,7 +1454,7 @@
       attDeleteLeave: function (id, opts) {
         if (opts && opts.admin) return client.from('attendance_leaves').delete().eq('id', id).then(unwrap).then(function () {});
         var s = readAttSession(); if (!s) return Promise.reject(new Error('로그인이 필요합니다.'));
-        return client.rpc('att_delete_leave', { p_pin: String(s.pin), p_id: id }).then(unwrap).then(function () {});
+        return client.rpc('att_delete_leave', { p_id: id }).then(unwrap).then(function () {});
       },
 
       /* ---------- 소모품 재고 ---------- */

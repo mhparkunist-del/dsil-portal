@@ -41,7 +41,13 @@
   function isOverdue(r) { return isUnlogged(r) && (new Date() - new Date(r.end)) > EQ.logDueDays * 86400000; }
   function myUnlogged() { return state.reservations.filter(function (r) { return isMineRes(r) && isUnlogged(r); }); }
   function isBlocked() { return myUnlogged().some(isOverdue); }
-  function isAuthorized(eq) { var u = me(); return !!u && (eq.users || []).some(function (x) { return nameKey(x.name) === nameKey(u.name); }); }
+  var GRADES = [{ id: 'training', label: '교육' }, { id: 'test', label: '유저 테스트 대기' }, { id: 'user', label: '유저' }, { id: 'super', label: '슈퍼유저' }];
+  function gradeLabel(g) { for (var i = 0; i < GRADES.length; i++) if (GRADES[i].id === g) return GRADES[i].label; return g || '-'; }
+  function gradeCls(g) { return { training: 'bg-secondary-lt', test: 'bg-yellow-lt', user: 'bg-green-lt', super: 'bg-blue-lt' }[g] || 'bg-secondary-lt'; }
+  function gradeOptions(selected) { return GRADES.map(function (g) { return '<option value="' + g.id + '"' + (g.id === selected ? ' selected' : '') + '>' + g.label + '</option>'; }).join(''); }
+  function myUser(eq) { var u = me(); return u ? ((eq.users || []).filter(function (x) { return nameKey(x.name) === nameKey(u.name); })[0] || null) : null; }
+  function canReserve(eq) { var u = myUser(eq); return !!u && (u.grade === 'user' || u.grade === 'super'); }
+  function isAuthorized(eq) { return canReserve(eq); }
   function daysLeft(r) { return Math.max(0, Math.ceil((new Date(r.end).getTime() + EQ.logDueDays * 86400000 - Date.now()) / 86400000)); }
   function fmtRange(r) {
     var s = new Date(r.start), e = new Date(r.end);
@@ -200,7 +206,8 @@
       }).join('');
     var eqOpts = state.equipment.filter(function (e) { return e.active !== false; }).map(function (e) {
       var sel = state.filterEq === e.id ? ' selected' : '';
-      return '<option value="' + esc(e.id) + '"' + sel + '>' + esc(e.name) + (isAuthorized(e) ? '' : ' (권한 없음)') + '</option>';
+      var mu = myUser(e);
+      return '<option value="' + esc(e.id) + '"' + sel + '>' + esc(e.name) + (canReserve(e) ? '' : (mu ? ' (' + gradeLabel(mu.grade) + ' · 예약 불가)' : ' (미등록)')) + '</option>';
     }).join('');
     var u = me();
     var body = '<div class="card-body"><div class="row g-4">'
@@ -216,10 +223,9 @@
       + '<div class="col-6"><label class="form-label required">시작</label><input type="time" class="form-control" name="start" required step="' + (EQ.slotMinutes * 60) + '" value="' + pad2(EQ.dayStart + 1) + ':00"' + (blocked ? ' disabled' : '') + '></div>'
       + '<div class="col-6"><label class="form-label required">종료</label><input type="time" class="form-control" name="end" required step="' + (EQ.slotMinutes * 60) + '" value="' + pad2(EQ.dayStart + 3) + ':00"' + (blocked ? ' disabled' : '') + '></div>'
       + '<div class="col-12"><label class="form-label">목적</label><input type="text" class="form-control" name="purpose" placeholder="예: TMD 소자 I-V 측정"' + (blocked ? ' disabled' : '') + '></div>'
-      + '<div class="col-12"><label class="form-label required">사용자 PIN</label><input type="password" class="form-control" name="pin" required inputmode="numeric" autocomplete="off" placeholder="장비 담당자에게 받은 PIN"' + (blocked ? ' disabled' : '') + '></div>'
       + '</div><div class="d-flex justify-content-between align-items-center mt-3"><span class="small text-secondary">최대 ' + EQ.maxHours + '시간 · ' + EQ.slotMinutes + '분 단위</span>'
       + '<button type="submit" class="btn btn-primary"' + (blocked ? ' disabled' : '') + '><i class="ti ti-calendar-check me-1"></i>예약</button></div></form>'
-      + '<div class="text-secondary small mt-3"><i class="ti ti-id me-1"></i>예약자 이름: <strong>' + esc(u ? u.name : '') + '</strong>. 장비 담당자가 이 이름으로 권한과 PIN을 등록해야 예약할 수 있습니다.</div>'
+      + '<div class="text-secondary small mt-3"><i class="ti ti-id me-1"></i>예약자: <strong>' + esc(u ? u.name : '') + '</strong>. 장비 담당자가 유저 또는 슈퍼유저 등급으로 등록한 장비만 예약할 수 있습니다. 내 예약은 캘린더에서 끌어서 시간을 바꿀 수 있습니다.</div>'
       + '</div></div></div>';
     return { body: body };
   }
@@ -230,9 +236,11 @@
     }).map(function (r) {
       var eq = eqById(r.equipmentId);
       var mine = isMineRes(r);
+      var movable = (mine && new Date(r.start) > new Date()) || managerOf(r.equipmentId);
       return {
         id: r.id, title: r.userName + (state.filterEq === 'all' && eq ? ' · ' + eq.name : '') + (r.purpose ? ' – ' + r.purpose : ''),
         start: r.start, end: r.end,
+        editable: movable, startEditable: movable, durationEditable: movable,
         backgroundColor: eq ? eq.color : '#999', borderColor: mine ? '#0c2f5f' : (eq ? eq.color : '#999'), textColor: '#fff',
         classNames: [mine ? 'fc-mine' : 'fc-other', isUnlogged(r) ? 'fc-unlogged' : '']
       };
@@ -275,10 +283,40 @@
         cal.unselect();
       },
       eventClick: function (info) { info.jsEvent.preventDefault(); showReservation(info.event.id); },
+      eventDrop: function (info) { moveEvent(info); },
+      eventResize: function (info) { moveEvent(info); },
       datesSet: function (info) { state.calView = info.view.type; state.calDate = info.view.currentStart; }
     });
     cal.render();
     state.calendar = cal;
+  }
+
+  /* 캘린더에서 끌어서 옮기거나 늘린 경우 */
+  function moveEvent(info) {
+    var r = resById(info.event.id);
+    if (!r) { info.revert(); return; }
+    var viaManager = !(isMineRes(r) && new Date(r.start) > new Date());
+    store.updateReservation(r.id, { start: info.event.start.toISOString(), end: info.event.end.toISOString() }, { managerPin: viaManager && managerOf(r.equipmentId) ? state.manager.pin : null })
+      .then(function () { toast('예약 시간을 ' + fmtRange({ start: info.event.start.toISOString(), end: info.event.end.toISOString() }) + ' 로 바꿨습니다.'); touchManager(); return refresh(); })
+      .catch(function (err) { info.revert(); handleError(err); });
+  }
+
+  function rescheduleDialog(resId) {
+    var r = resById(resId); if (!r) return Promise.resolve();
+    var eq = eqById(r.equipmentId);
+    var body = '<div class="text-secondary small mb-3">' + eqBadge(eq) + esc(eq ? eq.name : '') + ' · 현재 ' + esc(fmtRange(r)) + '</div><div class="row g-3">'
+      + '<div class="col-12"><label class="form-label required">날짜</label><input type="date" class="form-control" name="date" required value="' + esc(localDate(r.start)) + '"></div>'
+      + '<div class="col-6"><label class="form-label required">시작</label><input type="time" class="form-control" name="start" required step="' + (EQ.slotMinutes * 60) + '" value="' + esc(fmtTime(r.start)) + '"></div>'
+      + '<div class="col-6"><label class="form-label required">종료</label><input type="time" class="form-control" name="end" required step="' + (EQ.slotMinutes * 60) + '" value="' + esc(fmtTime(r.end)) + '"></div>'
+      + '<div class="col-12"><label class="form-label">목적</label><input type="text" class="form-control" name="purpose" value="' + esc(r.purpose) + '"></div></div>';
+    return dialog({ title: '예약 변경', bodyHtml: body, size: 'lg', okLabel: '변경' }).then(function (v) {
+      if (!v) return;
+      var start = new Date(v.date + 'T' + v.start), end = new Date(v.date + 'T' + v.end);
+      if (isNaN(start) || isNaN(end) || end <= start) { toast('시작·종료 시각을 확인하세요.', true); return; }
+      var viaManager = !(isMineRes(r) && new Date(r.start) > new Date());
+      return store.updateReservation(r.id, { start: start.toISOString(), end: end.toISOString(), purpose: v.purpose }, { managerPin: viaManager && managerOf(r.equipmentId) ? state.manager.pin : null })
+        .then(function () { toast('예약을 변경했습니다.'); touchManager(); return refresh(); });
+    });
   }
 
   /* ---------- 예약 상세 / 로그 ---------- */
@@ -298,6 +336,7 @@
       + (r.status === 'cancelled' ? dg('취소', esc(fmtDateTime(r.cancelledAt)) + (r.cancelledBy ? ' · ' + esc(r.cancelledBy) : '')) : '')
       + '</div>'
       + '<div class="d-flex flex-wrap gap-2">'
+      + (canCancel ? '<button type="button" class="btn" data-action="reschedule" data-res="' + esc(r.id) + '"><i class="ti ti-calendar-time me-1"></i>일정 변경</button>' : '')
       + (canCancel ? '<button type="button" class="btn btn-outline-danger" data-action="cancel-res" data-res="' + esc(r.id) + '"><i class="ti ti-calendar-off me-1"></i>예약 취소</button>' : '')
       + (mine && isUnlogged(r) ? '<button type="button" class="btn btn-primary" data-action="write-log" data-res="' + esc(r.id) + '"><i class="ti ti-pencil me-1"></i>로그 작성</button>' : '')
       + (log ? '<button type="button" class="btn" data-action="view-log" data-log="' + esc(log.id) + '"><i class="ti ti-notes me-1"></i>로그 보기</button>' : '')
@@ -354,7 +393,7 @@
       body += '<tr><td>' + eqBadge(eq) + esc(eq ? eq.name : '-') + '</td><td class="text-nowrap">' + esc(fmtRange(r)) + '<div class="small text-secondary">' + hours(r) + '시간</div></td>'
         + '<td>' + esc(r.purpose || '-') + '</td><td><span class="badge ' + st.cls + '">' + st.label + '</span>' + (isUnlogged(r) && !isOverdue(r) ? '<div class="small text-secondary">' + daysLeft(r) + '일 남음</div>' : '') + '</td>'
         + '<td class="text-end text-nowrap">'
-        + (r.status === 'booked' && new Date(r.start) > new Date() ? '<button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="cancel-res" data-res="' + esc(r.id) + '" title="예약 취소"><i class="ti ti-calendar-off"></i></button>' : '')
+        + (r.status === 'booked' && new Date(r.start) > new Date() ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="reschedule" data-res="' + esc(r.id) + '" title="일정 변경"><i class="ti ti-calendar-time"></i></button><button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="cancel-res" data-res="' + esc(r.id) + '" title="예약 취소"><i class="ti ti-calendar-off"></i></button>' : '')
         + (isUnlogged(r) ? '<button type="button" class="btn btn-sm btn-primary" data-action="write-log" data-res="' + esc(r.id) + '"><i class="ti ti-pencil me-1"></i>로그 작성</button>' : '')
         + (r.logId ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="view-log" data-log="' + esc(r.logId) + '" title="로그 보기"><i class="ti ti-notes"></i></button>' : '')
         + '</td></tr>';
@@ -368,13 +407,17 @@
     var now = new Date();
     var cards = state.equipment.map(function (e) {
       var upcoming = state.reservations.filter(function (r) { return r.equipmentId === e.id && r.status === 'booked' && new Date(r.end) > now; }).length;
-      var ok = isAuthorized(e);
+      var mu = myUser(e);
+      var ok = canReserve(e);
+      var badge = e.active === false ? '<span class="badge bg-secondary-lt">사용 중지</span>' : (mu ? '<span class="badge ' + gradeCls(mu.grade) + '">' + esc(gradeLabel(mu.grade)) + (ok ? '' : ' · 예약 불가') + '</span>' : '<span class="badge bg-secondary-lt">미등록</span>');
+      var users = (e.users || []).length;
+      var reservable = (e.users || []).filter(function (x) { return x.grade === 'user' || x.grade === 'super'; }).length;
       return '<div class="col-md-6 col-xl-4"><div class="card' + (e.active === false ? ' card-soon' : '') + '"><div class="card-status-top" style="background:' + esc(e.color) + '"></div><div class="card-body">'
-        + '<div class="d-flex justify-content-between align-items-start gap-2 mb-2"><h3 class="card-title mb-0">' + esc(e.name) + '</h3>' + (e.active === false ? '<span class="badge bg-secondary-lt">사용 중지</span>' : (ok ? '<span class="badge bg-green-lt">권한 있음</span>' : '<span class="badge bg-secondary-lt">권한 없음</span>')) + '</div>'
-        + '<div class="datagrid mb-3">' + dg('위치', esc(e.location || '-')) + dg('담당자', esc(e.managerName || '-')) + dg('사용자', (e.users || []).length + '명') + dg('예정 예약', upcoming + '건') + '</div>'
+        + '<div class="d-flex justify-content-between align-items-start gap-2 mb-2"><h3 class="card-title mb-0">' + esc(e.name) + '</h3>' + badge + '</div>'
+        + '<div class="datagrid mb-3">' + dg('위치', esc(e.location || '-')) + dg('담당자', esc(e.managerName || '-')) + dg('등록 사용자', users + '명 <span class="text-secondary">(예약 가능 ' + reservable + ')</span>') + dg('예정 예약', upcoming + '건') + '</div>'
         + (e.description ? '<div class="mb-2">' + esc(e.description) + '</div>' : '')
         + (e.rules ? '<div class="text-secondary small" style="white-space:pre-wrap"><i class="ti ti-alert-circle me-1"></i>' + esc(e.rules) + '</div>' : '')
-        + (!ok ? '<div class="text-secondary small mt-2">담당자 ' + esc(e.managerName || '') + '에게 사용자 등록과 PIN을 요청하세요.</div>' : '')
+        + (!ok && e.active !== false ? '<div class="text-secondary small mt-2">' + (mu ? '유저 등급 승급은 담당자 ' + esc(e.managerName || '') + '에게 요청하세요.' : '담당자 ' + esc(e.managerName || '') + '에게 사용자 등록을 요청하세요.') + '</div>' : '')
         + '</div></div></div>';
     }).join('');
     return { body: '<div class="card-body"><div class="row row-cards">' + cards + '</div></div>' };
@@ -404,19 +447,19 @@
 
     body += '<div class="card-body"><div class="row g-4">'
       + '<div class="col-lg-5"><h3 class="card-title mb-1"><i class="ti ti-user-plus me-1 text-primary"></i>사용자 등록</h3>'
-      + '<p class="text-secondary small mb-3">이름과 PIN을 정해 주면 그 이름으로 로그인한 사람이 이 장비를 예약할 수 있습니다. 같은 이름을 다시 등록하면 PIN이 바뀝니다.</p>'
+      + '<p class="text-secondary small mb-3">포털 로그인 이름과 등급을 정합니다. <strong>유저·슈퍼유저</strong>만 예약할 수 있고, 교육·유저 테스트 대기는 예약이 막힙니다. 같은 이름을 다시 등록하면 등급이 바뀝니다.</p>'
       + '<form id="grant-form"><div class="row g-2">'
-      + '<div class="col-12"><label class="form-label required">이름</label><input type="text" class="form-control" name="name" required placeholder="포털 로그인 이름과 같게"></div>'
-      + '<div class="col-6"><label class="form-label required">사용자 PIN</label><input type="password" class="form-control" name="pin" required inputmode="numeric" autocomplete="new-password" placeholder="숫자 4~8자리"></div>'
-      + '<div class="col-6"><label class="form-label required">PIN 확인</label><input type="password" class="form-control" name="pin2" required inputmode="numeric" autocomplete="new-password"></div>'
+      + '<div class="col-7"><label class="form-label required">이름</label><input type="text" class="form-control" name="name" required placeholder="포털 로그인 이름과 같게"></div>'
+      + '<div class="col-5"><label class="form-label required">등급</label><select class="form-select" name="grade">' + gradeOptions('training') + '</select></div>'
       + '</div><div class="d-flex justify-content-end mt-3"><button type="submit" class="btn btn-primary"><i class="ti ti-user-check me-1"></i>등록</button></div></form></div>'
       + '<div class="col-lg-7"><h3 class="card-title mb-2"><i class="ti ti-users me-1 text-primary"></i>등록된 사용자 <span class="text-secondary fw-normal">' + (eq.users || []).length + '명</span></h3>';
     if (!(eq.users || []).length) body += '<div class="text-secondary small">아직 등록된 사용자가 없습니다.</div>';
     else {
-      body += '<div class="table-responsive"><table class="table table-sm table-vcenter"><thead><tr><th>이름</th><th>등록일</th><th>등록자</th><th class="w-1"></th></tr></thead><tbody>'
+      body += '<div class="table-responsive"><table class="table table-sm table-vcenter"><thead><tr><th>이름</th><th>등급</th><th>변경일</th><th>처리자</th><th class="w-1"></th></tr></thead><tbody>'
         + eq.users.map(function (u) {
-          return '<tr><td class="fw-medium">' + esc(u.name) + '</td><td class="text-nowrap text-secondary">' + esc(fmtDate(u.grantedAt)) + '</td><td class="text-secondary">' + esc(u.grantedBy || '-') + '</td>'
-            + '<td class="text-end"><button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="revoke-user" data-user="' + esc(u.id) + '" title="권한 해제"><i class="ti ti-user-off"></i></button></td></tr>';
+          return '<tr data-user="' + esc(u.id) + '"><td class="fw-medium">' + esc(u.name) + '</td><td><select class="form-select form-select-sm" data-role="grade" style="min-width:9rem">' + gradeOptions(u.grade) + '</select></td>'
+            + '<td class="text-nowrap text-secondary">' + esc(fmtDate(u.grantedAt)) + '</td><td class="text-secondary">' + esc(u.grantedBy || '-') + '</td>'
+            + '<td class="text-end"><button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="revoke-user" data-user="' + esc(u.id) + '" title="등록 해제"><i class="ti ti-user-off"></i></button></td></tr>';
         }).join('') + '</tbody></table></div>';
     }
     body += '</div></div></div>';
@@ -429,7 +472,7 @@
         var st = resStatus(r);
         after += '<tr><td class="text-nowrap">' + esc(fmtRange(r)) + '</td><td>' + esc(r.userName) + '</td><td>' + esc(r.purpose || '-') + '</td><td><span class="badge ' + st.cls + '">' + st.label + '</span></td>'
           + '<td class="text-end text-nowrap">'
-          + (r.status === 'booked' && new Date(r.end) > now ? '<button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="cancel-res" data-res="' + esc(r.id) + '" title="예약 취소"><i class="ti ti-calendar-off"></i></button>' : '')
+          + (r.status === 'booked' && new Date(r.end) > now ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="reschedule" data-res="' + esc(r.id) + '" title="일정 변경"><i class="ti ti-calendar-time"></i></button><button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="cancel-res" data-res="' + esc(r.id) + '" title="예약 취소"><i class="ti ti-calendar-off"></i></button>' : '')
           + (isUnlogged(r) ? '<button type="button" class="btn btn-sm" data-action="waive-log" data-res="' + esc(r.id) + '"><i class="ti ti-check me-1"></i>로그 면제</button>' : '')
           + (r.logId ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="view-log" data-log="' + esc(r.logId) + '" title="로그 보기"><i class="ti ti-notes"></i></button>' : '')
           + '</td></tr>';
@@ -509,7 +552,7 @@
       var start = new Date(v.date + 'T' + v.start), end = new Date(v.date + 'T' + v.end);
       if (isNaN(start) || isNaN(end)) { toast('날짜와 시간을 입력하세요.', true); return; }
       if (end <= start) { toast('종료 시각이 시작보다 늦어야 합니다.', true); return; }
-      store.createReservation({ equipmentId: v.equipmentId, userPin: v.pin, start: start.toISOString(), end: end.toISOString(), purpose: v.purpose })
+      store.createReservation({ equipmentId: v.equipmentId, start: start.toISOString(), end: end.toISOString(), purpose: v.purpose })
         .then(function () { toast('예약했습니다.'); return refresh(); }).catch(handleError);
     }
     if (form.id === 'mgr-form') {
@@ -525,11 +568,9 @@
     if (form.id === 'grant-form') {
       e.preventDefault();
       var g = readForm(form);
-      if (!/^\d{4,8}$/.test(g.pin)) { toast('사용자 PIN은 숫자 4~8자리로 정하세요.', true); return; }
-      if (g.pin !== g.pin2) { toast('PIN 확인이 일치하지 않습니다.', true); return; }
       if (!state.manager) { toast('담당자 확인이 필요합니다.', true); return; }
-      store.grantUser(state.manager.equipmentId, state.manager.pin, g.name, g.pin)
-        .then(function (u) { toast((u ? u.name : g.name) + ' 사용자를 등록했습니다.'); touchManager(); return refresh(); }).catch(handleError);
+      store.grantUser(state.manager.equipmentId, state.manager.pin, g.name, g.grade)
+        .then(function (u) { toast((u ? u.name : g.name) + ' 님을 ' + gradeLabel(u ? u.grade : g.grade) + ' 등급으로 등록했습니다.'); touchManager(); return refresh(); }).catch(handleError);
     }
     if (form.id === 'eq-form') {
       e.preventDefault();
@@ -544,6 +585,15 @@
     }
   });
 
+  document.addEventListener('change', function (e) {
+    var el = e.target;
+    if (el.getAttribute('data-role') === 'grade' && state.manager) {
+      var row = el.closest('tr[data-user]');
+      store.setUserGrade(state.manager.equipmentId, state.manager.pin, row.getAttribute('data-user'), el.value)
+        .then(function (u) { toast(u.name + ' 님을 ' + gradeLabel(u.grade) + ' 등급으로 바꿨습니다.'); touchManager(); return refresh(); }).catch(handleError);
+    }
+  });
+
   document.addEventListener('click', function (e) {
     var btn = e.target.closest('[data-action]');
     if (!btn || btn.tagName === 'INPUT') return;
@@ -551,6 +601,7 @@
     var resId = btn.getAttribute('data-res');
 
     switch (action) {
+      case 'reschedule': U.closeAll(); rescheduleDialog(resId).catch(handleError); break;
       case 'tab': {
         e.preventDefault();
         var t = btn.getAttribute('data-tab');
@@ -563,7 +614,7 @@
       case 'lock-manager': setManager(null); toast('담당자 모드를 잠갔습니다.'); render(); break;
       case 'signout':
         setUnlock(false); setManager(null);
-        store.signOut().then(function () { state.magicLinkSent = false; state.tab = 'calendar'; return refresh(); }); break;
+        store.signOut().then(function () { window.location.replace('../index.html'); }); break;
       case 'refresh': refresh().then(function () { toast('새로고침 완료'); }); break;
       case 'filter-eq': state.filterEq = btn.getAttribute('data-eq'); render(); break;
       case 'write-log': U.closeAll(); writeLog(resId).catch(handleError); break;
@@ -591,9 +642,9 @@
       case 'revoke-user': {
         if (!state.manager) return;
         var uid = btn.getAttribute('data-user');
-        confirmDlg({ title: '권한 해제', message: '이 사용자의 예약 권한을 해제할까요? 기존 예약은 유지됩니다.', okLabel: '해제', danger: true }).then(function (ok) {
+        confirmDlg({ title: '등록 해제', message: '이 사용자의 등록을 해제할까요? 기존 예약은 유지됩니다.', okLabel: '해제', danger: true }).then(function (ok) {
           if (!ok) return;
-          return store.revokeUser(state.manager.equipmentId, state.manager.pin, uid).then(function () { toast('권한을 해제했습니다.'); touchManager(); return refresh(); });
+          return store.revokeUser(state.manager.equipmentId, state.manager.pin, uid).then(function () { toast('등록을 해제했습니다.'); touchManager(); return refresh(); });
         }).catch(handleError);
         break;
       }
@@ -614,7 +665,15 @@
   var initialTab = (window.location.hash || '').replace('#', '');
   if (TABS.indexOf(initialTab) >= 0) state.tab = initialTab;
 
+  function requireSession() {
+    var s = store.getSession();
+    if (s && s.status !== 'pending') return true;
+    window.location.replace('../index.html?next=equipment');
+    return false;
+  }
+
   store.init().then(function () {
+    if (!requireSession()) return;
     state.ready = true;
     store.onChange(function () { reload().then(render).catch(handleError); });
     return reload();

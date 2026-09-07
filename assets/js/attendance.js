@@ -6,7 +6,7 @@
   'use strict';
 
   var CFG = window.DSIL_CONFIG || {};
-  var A = Object.assign({ lateAfter: '09:00', closeAfter: '11:00', vacationDaysPerHalf: 2, selfRegister: true, holidays: {} }, CFG.attendance || {});
+  var A = Object.assign({ openAfter: '06:00', lateAfter: '09:00', closeAfter: '11:00', vacationDaysPerHalf: 2, selfRegister: true, holidays: {} }, CFG.attendance || {});
   var U = window.DSILUI;
   var esc = U.esc, pad2 = U.pad2, localDate = U.localDate, fmtDate = U.fmtDate, fmtTime = U.fmtTime, fmtDateTime = U.fmtDateTime;
   var $ = U.$, toast = U.toast, readForm = U.readForm, dialog = U.dialog, confirmDlg = U.confirmDlg, promptDlg = U.promptDlg, empty = U.empty, dg = U.dg, stat = U.stat, csvCell = U.csvCell, download = U.download;
@@ -59,7 +59,7 @@
     if (r) return { key: r.status, label: STATUS[r.status] ? STATUS[r.status].label : r.status, record: r, leave: null };
     var t = today();
     if (ds < t || (ds === t && nowHM() >= A.closeAfter)) return { key: 'absent', label: '결근 (미기입)', record: null, leave: null };
-    if (ds === t) return { key: 'pending', label: '미체크', record: null, leave: null };
+    if (ds === t) return { key: 'pending', label: nowHM() < A.openAfter ? '출석 전' : '미체크', record: null, leave: null };
     return { key: 'future', label: '', record: null, leave: null };
   }
   function badge(st) { var s = STATUS[st.key] || STATUS.future; return s.label || st.label ? '<span class="badge ' + (s.cls || 'bg-secondary-lt') + '">' + esc(st.label || s.label) + '</span>' : ''; }
@@ -78,8 +78,10 @@
   /* ---------- 관리자 잠금 ---------- */
   function readUnlock() { try { var t = Number(sessionStorage.getItem(ADMIN_KEY) || 0); var mins = Number(CFG.adminUnlockMinutes) > 0 ? Number(CFG.adminUnlockMinutes) : 10; return t > 0 && (Date.now() - t) < mins * 60000; } catch (e) { return false; } }
   function setUnlock(on) { try { if (on) sessionStorage.setItem(ADMIN_KEY, String(Date.now())); else sessionStorage.removeItem(ADMIN_KEY); } catch (e) { /* ignore */ } state.adminUnlocked = on; }
-  function isAdminActive() { return state.adminUnlocked; }
+  function isAdminEligible() { var s = store.getSession(); return !!(s && s.isAdmin); }
+  function isAdminActive() { return state.adminUnlocked && isAdminEligible(); }
   function enterAdmin() {
+    if (!isAdminEligible()) { toast('관리자 권한이 없습니다.', true); return; }
     if (readUnlock()) { setUnlock(true); state.tab = 'admin'; render(); return; }
     promptDlg({ title: '관리자 확인', message: '관리자 PIN을 입력하세요.', input: 'password', placeholder: 'PIN', okLabel: '열기' }).then(function (pin) {
       if (pin === null) return;
@@ -108,7 +110,7 @@
     if (!app) return;
     if (state.error) { app.innerHTML = '<div class="alert alert-danger"><h4 class="alert-title">초기화 오류</h4><div class="text-secondary">' + esc(state.error) + '</div></div>'; return; }
     if (!state.ready) { app.innerHTML = '<div class="text-secondary text-center py-5">불러오는 중…</div>'; return; }
-    if (!state.member) { app.innerHTML = renderLogin(); return; }
+    if (!state.member) { app.innerHTML = '<div class="text-secondary text-center py-5">출석 구성원을 연결하는 중…</div>'; return; }
 
     var m = state.member;
     var t = today();
@@ -127,7 +129,7 @@
     var tab = state.tab === 'log' ? renderLogTab() : state.tab === 'leave' ? renderLeaveTab() : state.tab === 'admin' ? renderAdminTab() : renderCheckTab(todaySt);
     html += '<div class="card mb-3"><div class="card-header"><ul class="nav nav-tabs card-header-tabs" role="tablist">'
       + tabLink('check', 'clock-check', '출석 체크') + tabLink('log', 'list-check', '출석 로그') + tabLink('leave', 'plane-departure', '휴가·출장')
-      + tabLink('admin', state.adminUnlocked ? 'lock-open' : 'lock', '관리자') + '</ul></div>' + tab.body + '</div>' + (tab.after || '');
+      + (isAdminEligible() ? tabLink('admin', state.adminUnlocked ? 'lock-open' : 'lock', '관리자') : '') + '</ul></div>' + tab.body + '</div>' + (tab.after || '');
     app.innerHTML = html;
     try { history.replaceState(null, '', '#' + state.tab); } catch (e) { /* ignore */ }
 
@@ -147,8 +149,7 @@
     if (!slot) return;
     if (!state.member) { slot.innerHTML = ''; return; }
     slot.innerHTML = '<div class="d-flex align-items-center gap-2"><span class="avatar avatar-sm bg-green-lt">' + esc(state.member.name.trim().charAt(0)) + '</span>'
-      + '<div class="d-none d-md-block lh-1"><div class="small fw-medium">' + esc(state.member.name) + '</div><div class="small text-secondary mt-1">' + (isAdminActive() ? '관리자 · 열림' : '출석 로그인') + '</div></div>'
-      + '<button type="button" class="btn btn-sm btn-ghost-secondary" data-action="change-pin" title="PIN 변경"><i class="ti ti-key"></i></button>'
+      + '<div class="d-none d-md-block lh-1"><div class="small fw-medium">' + esc(state.member.name) + '</div><div class="small text-secondary mt-1">' + (isAdminActive() ? '관리자 · 열림' : (isAdminEligible() ? '관리자 · 잠김' : '구성원')) + '</div></div>'
       + '<button type="button" class="btn btn-sm btn-ghost-secondary" data-action="signout"><i class="ti ti-logout"></i><span class="d-none d-sm-inline ms-1">로그아웃</span></button></div>';
   }
 
@@ -176,6 +177,7 @@
     else if (st.leave) body += '<div class="badge ' + STATUS[st.key].cls + ' fs-4 py-2 px-3 mt-2">' + esc(STATUS[st.key].label) + '</div><div class="text-secondary mt-3">오늘은 ' + esc(STATUS[st.key].label) + '(' + esc(st.leave.startDate) + ' ~ ' + esc(st.leave.endDate) + ')으로 등록되어 있어 출석 체크를 하지 않습니다.</div>';
     else if (st.record) body += '<div class="badge ' + STATUS[st.record.status].cls + ' fs-4 py-2 px-3 mt-2"><i class="ti ti-check me-1"></i>' + esc(STATUS[st.record.status].label) + ' 출근 ' + fmtTime(st.record.checkInAt) + '</div>' + (st.record.reason ? '<div class="text-secondary mt-2">사유: ' + esc(st.record.reason) + '</div>' : '') + '<div class="mt-3"><a href="#log" class="btn" data-action="tab" data-tab="log"><i class="ti ti-list-check me-1"></i>출석 로그 보기</a></div>';
     else if (st.key === 'absent') body += '<div class="badge bg-red-lt fs-4 py-2 px-3 mt-2">출석 체크 마감</div><div class="text-secondary mt-3">' + A.closeAfter + ' 이후에는 출석 체크를 할 수 없습니다. 오늘은 미기입(결근)으로 기록됩니다.</div>';
+    else if (hm < A.openAfter) body += '<div class="badge bg-secondary-lt fs-4 py-2 px-3 mt-2">출석 가능 시간 전</div><div class="text-secondary mt-3">출석 체크는 ' + A.openAfter + ' 부터 ' + A.closeAfter + ' 까지 할 수 있습니다.</div>';
     else {
       var late = hm >= A.lateAfter;
       body += '<div class="mt-3"><button type="button" class="btn btn-primary btn-lg px-5 py-3" data-action="check-in"><i class="ti ti-clock-check me-2"></i>출석 체크</button></div>'
@@ -188,7 +190,7 @@
       + '<div class="d-flex flex-wrap gap-2"><button type="button" class="btn" data-action="request-leave" data-type="vacation"><i class="ti ti-beach me-1"></i>휴가 신청</button>'
       + '<button type="button" class="btn" data-action="request-leave" data-type="trip"><i class="ti ti-briefcase me-1"></i>출장 신청</button></div>'
       + '<div class="mt-4"><h3 class="card-title mb-2"><i class="ti ti-info-circle me-1 text-primary"></i>규칙</h3><ul class="text-secondary small mb-0 ps-3">'
-      + '<li>' + A.lateAfter + ' 전 체크 → 정상</li><li>' + A.lateAfter + ' ~ ' + A.closeAfter + ' 체크 → 지각 (사유 입력 시 정상 참작)</li><li>' + A.closeAfter + ' 이후 → 체크 불가, 미기입(결근)</li><li>주말·공휴일·휴가·출장일은 체크하지 않음</li></ul></div>'
+      + '<li>출석 가능 시간 ' + A.openAfter + ' ~ ' + A.closeAfter + ' (그 밖의 시간은 체크 불가)</li><li>' + A.lateAfter + ' 전 체크 → 정상</li><li>' + A.lateAfter + ' ~ ' + A.closeAfter + ' 체크 → 지각 (사유 입력 시 정상 참작)</li><li>' + A.closeAfter + ' 이후 → 미기입(결근)</li><li>주말·공휴일·휴가·출장일은 체크하지 않음</li></ul></div>'
       + '</div></div></div>';
     return { body: body };
   }
@@ -201,6 +203,7 @@
 
   function doCheckIn() {
     var hm = nowHM();
+    if (hm < A.openAfter || hm >= A.closeAfter) { toast('출석 가능 시간은 ' + A.openAfter + ' ~ ' + A.closeAfter + ' 입니다.', true); return Promise.resolve(); }
     if (hm < A.lateAfter) {
       return store.attCheckIn('').then(function (rec) { afterCheckIn(rec); });
     }
@@ -411,7 +414,7 @@
       case 'unlock-admin': enterAdmin(); break;
       case 'lock-admin': setUnlock(false); state.tab = 'check'; toast('관리자 화면을 잠갔습니다.'); render(); break;
       case 'refresh': refresh().then(function () { toast('새로고침 완료'); }); break;
-      case 'signout': setUnlock(false); store.attLogout().then(function () { state.tab = 'check'; return refresh(); }); break;
+      case 'signout': setUnlock(false); store.attLogout().then(function () { return store.signOut(); }).then(function () { window.location.replace('../index.html'); }); break;
       case 'check-in': doCheckIn().catch(handleError); break;
       case 'request-leave': requestLeave(btn.getAttribute('data-type')).catch(handleError); break;
       case 'delete-leave': {
@@ -476,10 +479,19 @@
   var initialTab = (window.location.hash || '').replace('#', '');
   if (TABS.indexOf(initialTab) >= 0) state.tab = initialTab;
 
+  function requireSession() {
+    var s = store.getSession();
+    if (s && s.status !== 'pending') return true;
+    window.location.replace('../index.html?next=attendance');
+    return false;
+  }
+
   store.init().then(function () {
+    if (!requireSession()) return;
     state.ready = true;
     store.onChange(function () { reload().then(render).catch(handleError); });
-    return reload();
+    /* 포털 계정으로 출석 구성원 자동 연결 */
+    return store.attLoginFromPortal().then(reload);
   }).then(render).catch(function (err) {
     state.error = err && err.message ? err.message : String(err);
     render();

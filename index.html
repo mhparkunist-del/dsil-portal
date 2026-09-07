@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <title>DSIL Lab Portal</title>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="description" content="KAIST Device-to-System Integration Lab (DSIL) 연구실 내부 포털. 예산 관리, 장비 예약, 출석 시트.">
+  <meta name="description" content="KAIST Device-to-System Integration Lab (DSIL) 연구실 내부 포털. 로그인 후 예산 관리, 장비 예약, 출석 시트, 소모품 재고.">
   <link rel="icon" href="assets/img/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.5.0/dist/css/tabler.min.css">
@@ -22,7 +22,7 @@
 
     <header class="navbar navbar-expand-md d-print-none">
       <div class="container-xl">
-        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="메뉴 열기">
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbar-menu" aria-controls="navbar-menu" aria-expanded="false" aria-label="메뉴 열기" hidden>
           <span class="navbar-toggler-icon"></span>
         </button>
         <div class="navbar-brand navbar-brand-autodark d-none-navbar-horizontal pe-0 pe-md-3">
@@ -31,23 +31,14 @@
             <span class="badge badge-outline text-primary brand-tag">Lab Portal</span>
           </a>
         </div>
-        <div class="collapse navbar-collapse" id="navbar-menu">
+        <div class="d-flex align-items-center order-md-last ms-auto ms-md-0" id="user-slot"></div>
+        <div class="collapse navbar-collapse" id="navbar-menu" hidden>
           <ul class="navbar-nav">
-            <li class="nav-item active">
-              <a class="nav-link" href="index.html"><span class="nav-link-icon"><i class="ti ti-home"></i></span><span class="nav-link-title">홈</span></a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="budget/index.html"><span class="nav-link-icon"><i class="ti ti-wallet"></i></span><span class="nav-link-title">예산 관리</span></a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="equipment/index.html"><span class="nav-link-icon"><i class="ti ti-calendar-event"></i></span><span class="nav-link-title">장비 예약</span></a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="attendance/index.html"><span class="nav-link-icon"><i class="ti ti-clock-check"></i></span><span class="nav-link-title">출석</span></a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="inventory/index.html"><span class="nav-link-icon"><i class="ti ti-packages"></i></span><span class="nav-link-title">재고</span></a>
-            </li>
+            <li class="nav-item active"><a class="nav-link" href="index.html"><span class="nav-link-icon"><i class="ti ti-home"></i></span><span class="nav-link-title">홈</span></a></li>
+            <li class="nav-item"><a class="nav-link" href="budget/index.html"><span class="nav-link-icon"><i class="ti ti-wallet"></i></span><span class="nav-link-title">예산 관리</span></a></li>
+            <li class="nav-item"><a class="nav-link" href="equipment/index.html"><span class="nav-link-icon"><i class="ti ti-calendar-event"></i></span><span class="nav-link-title">장비 예약</span></a></li>
+            <li class="nav-item"><a class="nav-link" href="attendance/index.html"><span class="nav-link-icon"><i class="ti ti-clock-check"></i></span><span class="nav-link-title">출석</span></a></li>
+            <li class="nav-item"><a class="nav-link" href="inventory/index.html"><span class="nav-link-icon"><i class="ti ti-packages"></i></span><span class="nav-link-title">재고</span></a></li>
           </ul>
         </div>
       </div>
@@ -57,42 +48,17 @@
       <div class="page-header d-print-none">
         <div class="container-xl">
           <div class="row g-2 align-items-center">
-            <div class="col">
+            <div class="col text-center">
               <div class="page-pretitle">KAIST · Device-to-System Integration Lab</div>
-              <h2 class="page-title">Lab Portal</h2>
+              <h2 class="page-title justify-content-center">Lab Portal</h2>
             </div>
           </div>
         </div>
       </div>
 
       <div class="page-body">
-        <div class="container-xl">
-          <div class="row row-deck row-cards">
-            <div class="col-sm-6 col-lg-3">
-              <a href="budget/index.html" class="card card-link card-link-pop tool-tile">
-                <span class="avatar bg-blue-lt"><i class="ti ti-wallet"></i></span>
-                <h3 class="tool-title">과제별 예산 관리</h3>
-              </a>
-            </div>
-            <div class="col-sm-6 col-lg-3">
-              <a href="equipment/index.html" class="card card-link card-link-pop tool-tile">
-                <span class="avatar bg-orange-lt"><i class="ti ti-calendar-event"></i></span>
-                <h3 class="tool-title">장비 예약</h3>
-              </a>
-            </div>
-            <div class="col-sm-6 col-lg-3">
-              <a href="attendance/index.html" class="card card-link card-link-pop tool-tile">
-                <span class="avatar bg-green-lt"><i class="ti ti-clock-check"></i></span>
-                <h3 class="tool-title">출석 시트</h3>
-              </a>
-            </div>
-            <div class="col-sm-6 col-lg-3">
-              <a href="inventory/index.html" class="card card-link card-link-pop tool-tile">
-                <span class="avatar bg-purple-lt"><i class="ti ti-packages"></i></span>
-                <h3 class="tool-title">소모품 재고</h3>
-              </a>
-            </div>
-          </div>
+        <div class="container-xl" id="app">
+          <div class="text-secondary text-center py-5">불러오는 중…</div>
         </div>
       </div>
 
@@ -117,6 +83,12 @@
     </div>
   </div>
 
+  <div id="toast" class="portal-toast alert" role="status" aria-live="polite"></div>
+
+  <script src="assets/js/config.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tabler/core@1.5.0/dist/js/tabler.min.js" defer></script>
+  <script src="assets/js/ui.js"></script>
+  <script src="assets/js/store.js"></script>
+  <script src="assets/js/portal.js"></script>
 </body>
 </html>

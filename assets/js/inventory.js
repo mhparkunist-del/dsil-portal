@@ -146,7 +146,7 @@
       + '<td class="text-end text-nowrap tnum">' + won(value(i)) + '</td>'
       + '<td class="text-end text-nowrap">' + (withActions
         ? '<button type="button" class="btn btn-sm" data-action="restock" data-item="' + esc(i.id) + '"><i class="ti ti-plus me-1"></i>입고</button> <button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="edit-item" data-item="' + esc(i.id) + '" title="수정"><i class="ti ti-edit"></i></button><button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="delete-item" data-item="' + esc(i.id) + '" title="삭제"><i class="ti ti-trash"></i></button>'
-        : (i.active !== false && i.qty > 0 ? '<button type="button" class="btn btn-sm btn-primary" data-action="consume" data-item="' + esc(i.id) + '"><i class="ti ti-minus me-1"></i>소모</button>' : '')) + '</td></tr>';
+        : '') + '</td></tr>';
   }
 
   function renderStockTab() {
@@ -155,7 +155,7 @@
     var body = '<div class="card-body py-2 border-bottom d-flex flex-wrap gap-2 align-items-center">'
       + '<button type="button" class="btn btn-sm ' + (state.filterLoc === 'all' ? 'btn-primary' : 'btn-outline-secondary') + '" data-action="filter-loc" data-loc="all">전체</button>'
       + locs.map(function (l) { return '<button type="button" class="btn btn-sm ' + (state.filterLoc === l ? 'btn-primary' : 'btn-outline-secondary') + '" data-action="filter-loc" data-loc="' + esc(l) + '"><i class="ti ti-map-pin me-1"></i>' + esc(l) + '</button>'; }).join('')
-      + '<span class="ms-auto small text-secondary">소모 버튼으로 바로 차감할 수 있습니다</span></div>';
+      + '<a href="#consume" class="ms-auto small" data-action="tab" data-tab="consume">소모 처리는 소모 처리 탭에서 <i class="ti ti-arrow-right"></i></a></div>';
     if (!list.length) body += '<div class="card-body">' + empty('package-off', '등록된 품목이 없습니다', '담당자 탭에서 품목을 등록하세요.') + '</div>';
     else body += '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>품목</th><th>보관 장소</th><th class="text-end">재고</th><th class="text-end">단가</th><th class="text-end">금액</th><th class="w-1"></th></tr></thead><tbody>' + list.map(function (i) { return itemRow(i, false); }).join('') + '</tbody></table></div>';
     return { body: body };
@@ -354,7 +354,7 @@
       case 'unlock-admin': enterAdmin(); break;
       case 'lock-admin': setUnlock(false); state.tab = 'stock'; toast('관리자 화면을 잠갔습니다.'); render(); break;
       case 'lock-manager': setManager(null); state.editingItemId = null; toast('중간 관리자 모드를 잠갔습니다.'); render(); break;
-      case 'signout': setUnlock(false); setManager(null); store.signOut().then(function () { state.magicLinkSent = false; state.tab = 'stock'; return refresh(); }); break;
+      case 'signout': setUnlock(false); setManager(null); store.signOut().then(function () { window.location.replace('../index.html'); }); break;
       case 'refresh': refresh().then(function () { toast('새로고침 완료'); }); break;
       case 'filter-loc': state.filterLoc = btn.getAttribute('data-loc'); render(); break;
       case 'hist-type': state.histType = btn.getAttribute('data-type'); render(); break;
@@ -387,7 +387,15 @@
   var initialTab = (window.location.hash || '').replace('#', '');
   if (TABS.indexOf(initialTab) >= 0) state.tab = initialTab;
 
+  function requireSession() {
+    var s = store.getSession();
+    if (s && s.status !== 'pending') return true;
+    window.location.replace('../index.html?next=inventory');
+    return false;
+  }
+
   store.init().then(function () {
+    if (!requireSession()) return;
     state.ready = true;
     store.onChange(function () { reload().then(render).catch(handleError); });
     return reload();

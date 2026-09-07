@@ -1379,7 +1379,7 @@
         refresh().then(function () { toast('새로고침 완료'); }); break;
       case 'signout':
         setUnlock(false);
-        store.signOut().then(function () { state.magicLinkSent = false; state.tab = 'requests'; return refresh(); }); break;
+        store.signOut().then(function () { window.location.replace('../index.html'); }); break;
       case 'export-csv':
         exportCsv(queryResults()); break;
       case 'add-review-item': {
@@ -1515,7 +1515,15 @@
     var x = presetRange(state.exportFilter.preset); state.exportFilter.from = x.from; state.exportFilter.to = x.to;
   })();
 
+  function requireSession() {
+    var s = store.getSession();
+    if (s && s.status !== 'pending') return true;
+    window.location.replace('../index.html?next=budget');
+    return false;
+  }
+
   store.init().then(function () {
+    if (!requireSession()) return;
     state.ready = true;
     store.onChange(function () { reload().then(render).catch(handleError); });
     return reload();
