@@ -42,6 +42,9 @@ html { color-scheme: light; }
 
 .page-header .page-title { text-wrap: balance; }
 
+/* Portal: hide the menu until logged in (Tabler forces display:flex on .navbar-collapse at md+) */
+.navbar-collapse.is-hidden, .navbar-toggler.is-hidden { display: none !important; }
+
 /* Portal home: 2×2 big tool tiles */
 .tool-grid { max-width: 920px; margin: 0 auto; }
 .tool-tile {

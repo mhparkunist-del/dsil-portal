@@ -50,8 +50,8 @@
     var menu = $('#navbar-menu');
     var toggler = $('.navbar-toggler');
     var ok = !!(state.session && state.session.status !== 'pending');
-    if (menu) menu.hidden = !ok;
-    if (toggler) toggler.hidden = !ok;
+    if (menu) menu.classList.toggle('is-hidden', !ok);
+    if (toggler) toggler.classList.toggle('is-hidden', !ok);
     if (!slot) return;
     if (!state.session) { slot.innerHTML = ''; return; }
     var s = state.session;
