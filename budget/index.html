@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>과제별 예산 관리 | DSIL Lab Portal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="DSIL 연구실 과제별 예산 저장·배정 시스템. 구매 요청을 올리면 관리자가 과제를 배정하고 예산이 자동으로 관리됩니다.">
+  <link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+  <link rel="stylesheet" href="../assets/css/main.css">
+</head>
+<body>
+  <nav class="site-nav">
+    <div class="nav-strip">
+      <div class="nav-strip-inner">
+        <span class="nav-strip-text">Korea Advanced Institute of Science and Technology</span>
+        <div class="nav-strip-right">
+          <a class="strip-pill" href="https://dsil.kaist.ac.kr/" target="_blank" rel="noopener">DSIL 홈페이지</a>
+        </div>
+      </div>
+    </div>
+    <div class="nav-main">
+      <div class="nav-main-inner">
+        <a class="nav-brand" href="../index.html">
+          <img src="../assets/img/logo/KAIST_DSIL_Final.png" alt="DSIL" class="nav-logo-img nav-logo-lab">
+          <span class="nav-brand-tag">Lab Portal</span>
+        </a>
+        <div class="nav-right">
+          <div class="nav-links" id="nav-links">
+            <a class="nav-link" href="../index.html">Home</a>
+            <a class="nav-link is-active" href="./index.html">예산 관리</a>
+            <a class="nav-link is-disabled" href="#" title="준비 중">장비 예약</a>
+          </div>
+          <span id="user-slot"></span>
+          <button class="nav-toggle" type="button" aria-label="Menu" aria-expanded="false" onclick="toggleNav()">☰</button>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container">
+    <div id="app"><div class="empty">불러오는 중…</div></div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <div class="footer-left">
+        <div class="footer-lab">
+          <span class="footer-univ">KAIST</span>
+          <span class="footer-sep">|</span>
+          <span class="footer-labname">Device-to-System Integration Lab (DSIL)</span>
+        </div>
+        <div class="footer-address">Room 2302, Building E3-3 (Device Innovation Facility), KAIST, 291 Daehak-ro, Yuseong-gu, Daejeon 34141, Republic of Korea</div>
+      </div>
+      <div class="footer-right">
+        <div class="footer-copy">&copy; 2026 Device-to-System Integration Lab (DSIL) · Lab Portal</div>
+      </div>
+    </div>
+  </footer>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script src="../assets/js/config.js"></script>
+  <script src="../assets/js/nav.js"></script>
+  <script src="../assets/js/store.js"></script>
+  <script src="../assets/js/budget.js"></script>
+</body>
+</html>
