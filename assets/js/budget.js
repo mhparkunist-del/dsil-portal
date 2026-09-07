@@ -403,7 +403,7 @@
     html += '</div></div>';
 
     if (store.mode === 'local') {
-      html += '<div class="card"><h3 class="card-title"><span><span class="material-icons">backup</span>데이터 백업 (로컬 모드)</span></h3>'
+      html += '<div class="card card-backup"><h3 class="card-title"><span><span class="material-icons">backup</span>데이터 백업 (로컬 모드)</span></h3>'
         + '<p class="small muted" style="margin:0 0 10px">로컬 모드 데이터는 이 브라우저에만 있습니다. JSON으로 내보내 공유하거나, 다른 PC에서 가져올 수 있습니다.</p>'
         + '<div class="toolbar"><button class="btn btn-sm" data-action="export"><span class="material-icons">download</span>JSON 내보내기</button>'
         + '<label class="btn btn-sm"><span class="material-icons">upload</span>JSON 가져오기<input type="file" accept="application/json" data-action="import" class="hidden"></label>'
