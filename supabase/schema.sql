@@ -952,5 +952,36 @@ create policy "inv_items: admin all"    on public.inventory_items    for all    
 create policy "inv_moves: read all"     on public.inventory_moves    for select to authenticated using (true);
 create policy "inv_moves: admin all"    on public.inventory_moves    for all    to authenticated using (public.is_admin()) with check (public.is_admin());
 
+-- =====================================================================
+-- 보안 이벤트 (로그인 실패·잠금·매크로 의심). 관리자만 열람, 기록은 누구나(로그인 전 포함) 남길 수 있음
+-- =====================================================================
+create table if not exists public.security_events (
+  id          uuid primary key default gen_random_uuid(),
+  created_at  timestamptz not null default now(),
+  type        text not null,
+  severity    text not null default 'low' check (severity in ('low', 'high')),
+  name        text not null default '',
+  detail      text not null default '',
+  page        text not null default '',
+  user_agent  text not null default '',
+  user_id     uuid
+);
+create index if not exists security_events_created_idx on public.security_events (created_at desc);
+
+create or replace function public.log_security_event(p_type text, p_severity text, p_name text, p_detail text, p_page text, p_user_agent text)
+returns void language sql security definer set search_path = public as $$
+  insert into public.security_events (type, severity, name, detail, page, user_agent, user_id)
+  values (left(coalesce(p_type, 'other'), 40), case when p_severity = 'high' then 'high' else 'low' end, left(coalesce(p_name, ''), 80), left(coalesce(p_detail, ''), 400), left(coalesce(p_page, ''), 80), left(coalesce(p_user_agent, ''), 160), auth.uid());
+$$;
+revoke all on function public.log_security_event(text, text, text, text, text, text) from public;
+grant execute on function public.log_security_event(text, text, text, text, text, text) to anon, authenticated;
+
+alter table public.security_events enable row level security;
+drop policy if exists "security: admin read" on public.security_events;
+create policy "security: admin read" on public.security_events for select to authenticated using (public.is_admin());
+
+-- 실시간 알림을 이메일/웹훅으로 보내려면 Database Webhooks(Dashboard > Database > Webhooks)에서
+-- security_events INSERT 를 Slack/Discord/이메일 서비스로 연결하세요. 웹훅 주소가 코드에 노출되지 않습니다.
+
 -- (선택) 특정 도메인만 가입 허용하려면 Supabase Dashboard > Authentication > Settings 에서
 -- "Restrict sign-ups to email domains" 에 kaist.ac.kr 을 추가하세요.

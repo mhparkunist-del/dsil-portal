@@ -12,7 +12,7 @@
   var PIN_RE = new RegExp('^' + (CFG.reviewPinPattern || '\\d{4,8}') + '$');
   var store = window.DSILStore.create(CFG);
   var UNLOCK_KEY = 'dsil-budget-admin-unlock';
-  var TABS = ['requests', 'query', 'review', 'budget', 'admin'];
+  var TABS = ['requests', 'query', 'review', 'admin'];
 
   var STATUS = {
     pending: { label: '미처리', cls: 'bg-yellow-lt' },
@@ -323,7 +323,8 @@
       state.reviews = res[2].slice().sort(byNewest);
       state.exports = res[3].slice().sort(byNewest);
       state.reviewsFull = full;
-      if ((state.tab === 'admin' || state.tab === 'budget') && !isAdminActive()) state.tab = 'requests';
+      if (state.tab === 'budget') state.tab = 'admin';
+      if (state.tab === 'admin' && !isAdminActive()) state.tab = 'requests';
     });
   }
 
@@ -359,9 +360,9 @@
         + '</div>';
     }
 
+    if (state.tab === 'budget') state.tab = 'admin';
     var tab = state.tab === 'query' ? renderQueryTab()
       : state.tab === 'review' ? renderReviewTab()
-      : state.tab === 'budget' ? renderBudgetTab()
       : state.tab === 'admin' ? renderAdminTab()
       : renderRequestsTab();
 
@@ -369,8 +370,7 @@
       + tabLink('requests', 'cart-plus', '구매 요청')
       + tabLink('query', 'list-search', '요청 조회')
       + tabLink('review', 'shield-check', '구매 심의', sum.my.rvPending && !isAdminActive() ? '<span class="badge bg-yellow-lt ms-2">' + sum.my.rvPending + '</span>' : '')
-      + (isAdminEligible() ? tabLink('budget', state.adminUnlocked ? 'wallet' : 'lock', '과제 예산') : '')
-      + (isAdminEligible() ? tabLink('admin', state.adminUnlocked ? 'lock-open' : 'lock', '관리자', (sum.pendingCount + sum.reviewPending) && state.adminUnlocked ? '<span class="badge bg-yellow-lt ms-2">' + (sum.pendingCount + sum.reviewPending) + '</span>' : '') : '')
+      + (isAdminEligible() ? tabLink('admin', state.adminUnlocked ? 'lock-open' : 'lock', '관리자 · 과제 예산', (sum.pendingCount + sum.reviewPending) && state.adminUnlocked ? '<span class="badge bg-yellow-lt ms-2">' + (sum.pendingCount + sum.reviewPending) + '</span>' : '') : '')
       + '</ul></div>' + tab.body + '</div>' + (tab.after || '');
 
     app.innerHTML = html;
@@ -865,7 +865,11 @@
       return '<div class="col-6 col-md-3"><label class="form-label">' + esc(c.label) + '</label><input type="number" class="form-control tnum" name="budget_' + esc(c.id) + '" min="0" step="1" value="' + (editing ? budgetOf(editing, c.id) : '') + '" placeholder="0"></div>';
     }).join('');
 
-    var after = '<div class="row row-cards mb-3">'
+    /* 과제 예산 현황 (관리자 탭에 통합) */
+    var budgetView = renderBudgetTab();
+    var after = '<div class="card mb-3"><div class="card-header"><h3 class="card-title"><i class="ti ti-wallet me-1 text-primary"></i>과제 예산 현황</h3></div>' + budgetView.body + '</div>';
+
+    after += '<div class="row row-cards mb-3">'
       + '<div class="col-lg-5"><div class="card"><div class="card-header"><h3 class="card-title"><i class="ti ti-' + (editing ? 'edit' : 'folder-plus') + ' me-1 text-primary"></i>' + (editing ? '과제 수정' : '과제 추가') + '</h3>'
       + (editing ? '<div class="card-actions"><button type="button" class="btn btn-sm btn-ghost-secondary" data-action="cancel-edit">취소</button></div>' : '') + '</div>'
       + '<div class="card-body"><form id="project-form" data-id="' + esc(editing ? editing.id : '') + '"><div class="row g-3">'
@@ -1364,7 +1368,8 @@
       case 'tab': {
         e.preventDefault();
         var t = btn.getAttribute('data-tab');
-        if ((t === 'admin' || t === 'budget') && !isAdminActive()) { enterAdmin(t); return; }
+        if (t === 'budget') t = 'admin';
+        if (t === 'admin' && !isAdminActive()) { enterAdmin('admin'); return; }
         if (btn.getAttribute('data-mine')) { state.query.mine = true; state.query.preset = 'all'; state.query.from = ''; state.query.to = ''; }
         state.tab = t; render();
         break;
@@ -1372,7 +1377,7 @@
       case 'unlock-admin':
         enterAdmin('admin'); break;
       case 'unlock-budget':
-        enterAdmin('budget'); break;
+        enterAdmin('admin'); break;
       case 'lock-admin':
         setUnlock(false); state.tab = 'requests'; toast('관리자 화면을 잠갔습니다.'); refresh(); break;
       case 'refresh':
@@ -1509,6 +1514,7 @@
 
   /* ---------- boot ---------- */
   var initialTab = (window.location.hash || '').replace('#', '');
+  if (initialTab === 'budget') initialTab = 'admin';
   if (TABS.indexOf(initialTab) >= 0) state.tab = initialTab;
   (function () {
     var r = presetRange(state.query.preset); state.query.from = r.from; state.query.to = r.to;

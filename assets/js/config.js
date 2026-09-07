@@ -64,6 +64,16 @@ window.DSIL_CONFIG = {
     }
   },
 
+  /* 보안: 로그인 잠금·매크로 의심 감지·알림 */
+  security: {
+    maxLoginFailures: 5,       /* 같은 이름으로 연속 실패 허용 횟수. 넘으면 잠금 */
+    lockoutMinutes: 10,        /* 잠금 시간(분) */
+    macroThresholdMs: 1200,    /* 페이지가 뜬 뒤 이 시간(ms) 안에 제출되면 매크로 의심으로 기록·알림 */
+    /* 알림 웹훅(Discord 또는 Slack incoming webhook URL). 비우면 포털 관리자 화면의 보안 이벤트에만 남습니다.
+       이 파일은 공개 저장소에 올라가므로 웹훅 주소가 노출됩니다. 노출이 싫으면 공용 DB 모드에서 DB 트리거 알림을 쓰세요. */
+    alertWebhookUrl: ''
+  },
+
   /* 소모품 재고 */
   inventory: {
     categories: ['웨이퍼·기판', '케미컬·가스', '전구체·타겟', '소모품·공구', '기타'],

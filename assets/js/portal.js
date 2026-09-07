@@ -17,13 +17,32 @@
   ];
   var STATUS = { active: { label: '사용 중', cls: 'bg-green-lt' }, pending: { label: '승인 대기', cls: 'bg-yellow-lt' }, disabled: { label: '중지', cls: 'bg-secondary-lt' }, rejected: { label: '거절', cls: 'bg-red-lt' } };
 
-  var state = { ready: false, error: null, session: null, accounts: [], magicLinkSent: false, next: null };
+  var SEC = Object.assign({ maxLoginFailures: 5, lockoutMinutes: 10, macroThresholdMs: 1200 }, CFG.security || {});
+  var LOAD_AT = Date.now();
+  var FAILS_KEY = 'dsil-login-fails';
+  var state = { ready: false, error: null, session: null, accounts: [], events: [], magicLinkSent: false, next: null };
+
+  function nameKey(s) { return String(s || '').replace(/\s+/g, '').toLowerCase(); }
+  function readFails() { try { return JSON.parse(localStorage.getItem(FAILS_KEY) || '{}'); } catch (e) { return {}; } }
+  function writeFails(obj) { try { localStorage.setItem(FAILS_KEY, JSON.stringify(obj)); } catch (e) { /* ignore */ } }
+  function lockedUntil(name) { var f = readFails()[nameKey(name)]; return f && f.lockedUntil && f.lockedUntil > Date.now() ? f.lockedUntil : 0; }
+  function noteFailure(name) {
+    var all = readFails(); var k = nameKey(name); var f = all[k] || { count: 0, first: Date.now() };
+    if (Date.now() - f.first > SEC.lockoutMinutes * 60000) f = { count: 0, first: Date.now() };
+    f.count++;
+    if (f.count >= SEC.maxLoginFailures) f.lockedUntil = Date.now() + SEC.lockoutMinutes * 60000;
+    all[k] = f; writeFails(all);
+    return f;
+  }
+  function clearFailure(name) { var all = readFails(); delete all[nameKey(name)]; writeFails(all); }
   (function () { try { var n = new URLSearchParams(window.location.search).get('next'); if (n && TOOLS.some(function (t) { return t.id === n; })) state.next = n; } catch (e) { /* ignore */ } })();
 
   function reload() {
     state.session = store.getSession();
-    if (state.session && state.session.isAdmin) return store.listAccounts().then(function (a) { state.accounts = a; });
-    state.accounts = [];
+    if (state.session && state.session.isAdmin) {
+      return Promise.all([store.listAccounts(), store.listSecurityEvents()]).then(function (res) { state.accounts = res[0]; state.events = res[1]; });
+    }
+    state.accounts = []; state.events = [];
     return Promise.resolve();
   }
 
@@ -105,7 +124,22 @@
           + (!self ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="toggle-role" data-id="' + esc(a.id) + '" data-role="' + (a.role === 'admin' ? 'member' : 'admin') + '" title="' + (a.role === 'admin' ? '구성원으로' : '관리자로') + '"><i class="ti ti-' + (a.role === 'admin' ? 'user-down' : 'user-up') + '"></i></button>' : '')
           + (!self ? '<button type="button" class="btn btn-sm btn-ghost-' + (a.status === 'active' ? 'danger' : 'secondary') + ' btn-icon" data-action="toggle-status" data-id="' + esc(a.id) + '" data-status="' + (a.status === 'active' ? 'disabled' : 'active') + '" title="' + (a.status === 'active' ? '사용 중지' : '사용 재개') + '"><i class="ti ti-' + (a.status === 'active' ? 'user-off' : 'user-check') + '"></i></button>' : '')
           + '</td></tr>';
-      }).join('') + '</tbody></table></div></div></div>';
+      }).join('') + '</tbody></table></div></div>';
+
+    var TYPES = { login_failed: { label: '로그인 실패', cls: 'bg-yellow-lt' }, login_lockout: { label: '로그인 잠금', cls: 'bg-red-lt' }, login_locked_attempt: { label: '잠금 중 시도', cls: 'bg-orange-lt' }, macro_suspect: { label: '매크로 의심', cls: 'bg-red-lt' } };
+    var dayAgo = Date.now() - 86400000;
+    var recentHigh = state.events.filter(function (e) { return e.severity === 'high' && new Date(e.createdAt) > dayAgo; }).length;
+    html += '<div class="card mt-3"><div class="card-header"><h3 class="card-title"><i class="ti ti-shield-lock me-1 text-primary"></i>보안 이벤트 ' + (recentHigh ? '<span class="badge bg-red-lt ms-1">24시간 내 ' + recentHigh + '건</span>' : '')
+      + '</h3><div class="card-actions small text-secondary">' + (CFG.security && CFG.security.alertWebhookUrl ? '웹훅 알림 켜짐' : '웹훅 알림 꺼짐 · config.js security.alertWebhookUrl') + '</div></div>';
+    if (!state.events.length) html += '<div class="card-body text-secondary small">기록된 보안 이벤트가 없습니다. 로그인 ' + SEC.maxLoginFailures + '회 연속 실패 시 ' + SEC.lockoutMinutes + '분 잠금, 페이지가 뜬 뒤 ' + SEC.macroThresholdMs + 'ms 안의 제출은 매크로 의심으로 기록됩니다.</div>';
+    else {
+      html += '<div class="table-responsive" style="max-height:360px;overflow:auto"><table class="table table-sm table-vcenter card-table" id="security-table"><thead><tr><th class="w-1">일시</th><th class="w-1">종류</th><th>이름</th><th>내용</th><th>페이지</th></tr></thead><tbody>'
+        + state.events.slice(0, 100).map(function (e) {
+          var t = TYPES[e.type] || { label: e.type, cls: 'bg-secondary-lt' };
+          return '<tr><td class="text-nowrap text-secondary">' + fmtDateTime(e.createdAt) + '</td><td><span class="badge ' + t.cls + '">' + esc(t.label) + '</span></td><td class="text-nowrap">' + esc(e.name || '-') + '</td><td class="small">' + esc(e.detail) + '</td><td class="small text-secondary">' + esc(e.page) + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+    html += '</div></div>';
     return html;
   }
 
@@ -134,12 +168,35 @@
     var form = e.target;
     if (form.id !== 'login-form') return;
     e.preventDefault();
-    store.signIn(readForm(form)).then(function (res) {
+    var v = readForm(form);
+    var who = v.name || v.email || '';
+    var elapsed = Date.now() - LOAD_AT;
+    if (elapsed < SEC.macroThresholdMs) {
+      store.securityEvent({ type: 'macro_suspect', severity: 'high', name: who, detail: '페이지가 뜬 뒤 ' + elapsed + 'ms 만에 로그인 제출' });
+    }
+    var until = lockedUntil(who);
+    if (until) {
+      var mins = Math.ceil((until - Date.now()) / 60000);
+      store.securityEvent({ type: 'login_locked_attempt', severity: 'low', name: who, detail: '잠금 중 로그인 시도 (' + mins + '분 남음)' });
+      toast('로그인 실패가 많아 ' + mins + '분 동안 잠겨 있습니다.', true);
+      return;
+    }
+    store.signIn(v).then(function (res) {
       if (res && res.magicLinkSent) { state.magicLinkSent = true; render(); return; }
+      clearFailure(who);
       if (goNext()) return;
       toast(res.user.name + '님, 환영합니다.');
       return refresh();
-    }).catch(handleError);
+    }).catch(function (err) {
+      var f = noteFailure(who);
+      if (f.lockedUntil && f.lockedUntil > Date.now()) {
+        store.securityEvent({ type: 'login_lockout', severity: 'high', name: who, detail: f.count + '회 연속 실패로 ' + SEC.lockoutMinutes + '분 잠금 (' + (err && err.message ? err.message : '') + ')' });
+        toast('로그인 실패가 ' + f.count + '회를 넘어 ' + SEC.lockoutMinutes + '분 동안 잠깁니다.', true);
+        return;
+      }
+      store.securityEvent({ type: 'login_failed', severity: 'low', name: who, detail: (err && err.message ? err.message : '실패') + ' (' + f.count + '/' + SEC.maxLoginFailures + ')' });
+      handleError(err);
+    });
   });
 
   document.addEventListener('click', function (e) {

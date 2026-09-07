@@ -56,6 +56,21 @@
   }
   function hours(r) { return Math.round((new Date(r.end) - new Date(r.start)) / 360000) / 10; }
   function toLocalInput(iso) { var d = new Date(iso); return isNaN(d) ? '' : localDate(iso) + 'T' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
+  /* 기본 예약 시간: 다음 정각부터 2시간 (표시 시간대 안으로) */
+  function defaultSlot() {
+    var s = new Date(); s.setMinutes(0, 0, 0); s.setHours(s.getHours() + 1);
+    if (s.getHours() < EQ.dayStart) s.setHours(EQ.dayStart, 0, 0, 0);
+    if (s.getHours() >= EQ.dayEnd - 1) { s.setDate(s.getDate() + 1); s.setHours(EQ.dayStart, 0, 0, 0); }
+    var e = new Date(s.getTime() + 2 * 3600000);
+    return { start: toLocalInput(s.toISOString()), end: toLocalInput(e.toISOString()) };
+  }
+  /* 종료가 시작보다 빠르면 시작 + 슬롯 만큼으로 맞춤 */
+  function syncEnd(form) {
+    var s = form.querySelector('[data-role="dt-start"]'), e = form.querySelector('[data-role="dt-end"]');
+    if (!s || !e || !s.value) return;
+    e.min = s.value;
+    if (!e.value || e.value <= s.value) { var d = new Date(s.value); d.setMinutes(d.getMinutes() + Math.max(EQ.slotMinutes, 60)); e.value = toLocalInput(d.toISOString()); }
+  }
   function resStatus(r) {
     if (r.status === 'cancelled') return { label: '취소', cls: 'bg-secondary-lt' };
     if (isRunning(r)) return { label: '사용 중', cls: 'bg-blue-lt' };
@@ -217,11 +232,11 @@
     if (blocked) {
       body += '<div class="alert alert-danger"><div class="fw-medium">새 예약이 막혀 있습니다</div><div class="small">사용 로그 기한(' + EQ.logDueDays + '일)이 지난 예약이 있습니다. 위의 로그 작성을 마치면 다시 예약할 수 있습니다.</div></div>';
     }
+    var def = defaultSlot();
     body += '<form id="res-form"' + (blocked ? ' class="opacity-50"' : '') + '><div class="row g-3">'
       + '<div class="col-12"><label class="form-label required">장비</label><select class="form-select" name="equipmentId" required' + (blocked ? ' disabled' : '') + '>' + eqOpts + '</select></div>'
-      + '<div class="col-12"><label class="form-label required">날짜</label><input type="date" class="form-control" name="date" required value="' + esc(localDate(new Date().toISOString())) + '"' + (blocked ? ' disabled' : '') + '></div>'
-      + '<div class="col-6"><label class="form-label required">시작</label><input type="time" class="form-control" name="start" required step="' + (EQ.slotMinutes * 60) + '" value="' + pad2(EQ.dayStart + 1) + ':00"' + (blocked ? ' disabled' : '') + '></div>'
-      + '<div class="col-6"><label class="form-label required">종료</label><input type="time" class="form-control" name="end" required step="' + (EQ.slotMinutes * 60) + '" value="' + pad2(EQ.dayStart + 3) + ':00"' + (blocked ? ' disabled' : '') + '></div>'
+      + '<div class="col-12"><label class="form-label required">시작 (날짜 · 시각)</label><input type="datetime-local" class="form-control" name="start" required step="' + (EQ.slotMinutes * 60) + '" value="' + def.start + '" min="' + localDate(new Date().toISOString()) + 'T00:00" data-role="dt-start"' + (blocked ? ' disabled' : '') + '></div>'
+      + '<div class="col-12"><label class="form-label required">종료 (날짜 · 시각)</label><input type="datetime-local" class="form-control" name="end" required step="' + (EQ.slotMinutes * 60) + '" value="' + def.end + '" min="' + def.start + '" data-role="dt-end"' + (blocked ? ' disabled' : '') + '></div>'
       + '<div class="col-12"><label class="form-label">목적</label><input type="text" class="form-control" name="purpose" placeholder="예: TMD 소자 I-V 측정"' + (blocked ? ' disabled' : '') + '></div>'
       + '</div><div class="d-flex justify-content-between align-items-center mt-3"><span class="small text-secondary">최대 ' + EQ.maxHours + '시간 · ' + EQ.slotMinutes + '분 단위</span>'
       + '<button type="submit" class="btn btn-primary"' + (blocked ? ' disabled' : '') + '><i class="ti ti-calendar-check me-1"></i>예약</button></div></form>'
@@ -273,10 +288,10 @@
       events: calendarEvents(),
       select: function (info) {
         var f = $('#res-form');
-        if (f && !f.date.disabled) {
-          f.date.value = localDate(info.start.toISOString());
-          f.start.value = fmtTime(info.start.toISOString());
-          f.end.value = fmtTime(info.end.toISOString());
+        if (f && !f.start.disabled) {
+          f.start.value = toLocalInput(info.start.toISOString());
+          f.end.value = toLocalInput(info.end.toISOString());
+          f.end.min = f.start.value;
           if (state.filterEq !== 'all') f.equipmentId.value = state.filterEq;
           f.purpose.focus();
         }
@@ -305,14 +320,14 @@
     var r = resById(resId); if (!r) return Promise.resolve();
     var eq = eqById(r.equipmentId);
     var body = '<div class="text-secondary small mb-3">' + eqBadge(eq) + esc(eq ? eq.name : '') + ' · 현재 ' + esc(fmtRange(r)) + '</div><div class="row g-3">'
-      + '<div class="col-12"><label class="form-label required">날짜</label><input type="date" class="form-control" name="date" required value="' + esc(localDate(r.start)) + '"></div>'
-      + '<div class="col-6"><label class="form-label required">시작</label><input type="time" class="form-control" name="start" required step="' + (EQ.slotMinutes * 60) + '" value="' + esc(fmtTime(r.start)) + '"></div>'
-      + '<div class="col-6"><label class="form-label required">종료</label><input type="time" class="form-control" name="end" required step="' + (EQ.slotMinutes * 60) + '" value="' + esc(fmtTime(r.end)) + '"></div>'
+      + '<div class="col-6"><label class="form-label required">시작 (날짜 · 시각)</label><input type="datetime-local" class="form-control" name="start" required step="' + (EQ.slotMinutes * 60) + '" value="' + esc(toLocalInput(r.start)) + '" data-role="dt-start"></div>'
+      + '<div class="col-6"><label class="form-label required">종료 (날짜 · 시각)</label><input type="datetime-local" class="form-control" name="end" required step="' + (EQ.slotMinutes * 60) + '" value="' + esc(toLocalInput(r.end)) + '" min="' + esc(toLocalInput(r.start)) + '" data-role="dt-end"></div>'
       + '<div class="col-12"><label class="form-label">목적</label><input type="text" class="form-control" name="purpose" value="' + esc(r.purpose) + '"></div></div>';
     return dialog({ title: '예약 변경', bodyHtml: body, size: 'lg', okLabel: '변경' }).then(function (v) {
       if (!v) return;
-      var start = new Date(v.date + 'T' + v.start), end = new Date(v.date + 'T' + v.end);
-      if (isNaN(start) || isNaN(end) || end <= start) { toast('시작·종료 시각을 확인하세요.', true); return; }
+      var start = new Date(v.start), end = new Date(v.end);
+      if (isNaN(start) || isNaN(end)) { toast('시작·종료 시각을 입력하세요.', true); return; }
+      if (end <= start) { toast('종료 시각이 시작보다 늦어야 합니다.', true); return; }
       var viaManager = !(isMineRes(r) && new Date(r.start) > new Date());
       return store.updateReservation(r.id, { start: start.toISOString(), end: end.toISOString(), purpose: v.purpose }, { managerPin: viaManager && managerOf(r.equipmentId) ? state.manager.pin : null })
         .then(function () { toast('예약을 변경했습니다.'); touchManager(); return refresh(); });
@@ -549,9 +564,13 @@
     if (form.id === 'res-form') {
       e.preventDefault();
       var v = readForm(form);
-      var start = new Date(v.date + 'T' + v.start), end = new Date(v.date + 'T' + v.end);
-      if (isNaN(start) || isNaN(end)) { toast('날짜와 시간을 입력하세요.', true); return; }
+      var start = new Date(v.start), end = new Date(v.end);
+      if (isNaN(start) || isNaN(end)) { toast('시작·종료 날짜와 시각을 입력하세요.', true); return; }
       if (end <= start) { toast('종료 시각이 시작보다 늦어야 합니다.', true); return; }
+      var elapsed = Date.now() - LOAD_AT;
+      if (elapsed < SEC.macroThresholdMs && store.securityEvent) {
+        store.securityEvent({ type: 'macro_suspect', severity: 'high', name: me() ? me().name : '', detail: '페이지가 뜬 뒤 ' + elapsed + 'ms 만에 예약 제출' });
+      }
       store.createReservation({ equipmentId: v.equipmentId, start: start.toISOString(), end: end.toISOString(), purpose: v.purpose })
         .then(function () { toast('예약했습니다.'); return refresh(); }).catch(handleError);
     }
@@ -585,8 +604,15 @@
     }
   });
 
+  var LOAD_AT = Date.now();
+  var SEC = Object.assign({ macroThresholdMs: 1200 }, CFG.security || {});
+
   document.addEventListener('change', function (e) {
     var el = e.target;
+    if (el.getAttribute('data-role') === 'dt-start' || el.getAttribute('data-role') === 'dt-end') {
+      var f = el.closest('form'); if (f) syncEnd(f);
+      return;
+    }
     if (el.getAttribute('data-role') === 'grade' && state.manager) {
       var row = el.closest('tr[data-user]');
       store.setUserGrade(state.manager.equipmentId, state.manager.pin, row.getAttribute('data-user'), el.value)

@@ -285,6 +285,7 @@
     if (!Array.isArray(data.invManagers)) data.invManagers = [];
     if (!Array.isArray(data.invItems)) data.invItems = [];
     if (!Array.isArray(data.invMoves)) data.invMoves = [];
+    if (!Array.isArray(data.security)) data.security = [];
     if (!Array.isArray(data.accounts)) data.accounts = [];
     if (!data.accounts.some(function (a) { return a.role === 'admin'; })) {
       data.accounts.unshift({ id: SUPER_ADMIN.id, name: SUPER_ADMIN.name, pinHash: '', seedPin: SUPER_ADMIN.seedPin, role: 'admin', status: 'active', createdAt: nowISO(), approvedAt: nowISO(), approvedBy: '시스템' });
@@ -294,6 +295,24 @@
 
   function publicInvManager(m) { return { id: m.id, name: m.name, area: m.area || '', createdAt: m.createdAt }; }
   function publicAccount(a) { return { id: a.id, name: a.name, role: a.role || 'member', status: a.status || 'pending', createdAt: a.createdAt, approvedAt: a.approvedAt || null, approvedBy: a.approvedBy || null }; }
+
+  /* 보안 이벤트 알림 (Discord/Slack incoming webhook). 실패해도 앱 흐름은 막지 않음 */
+  function sendWebhook(url, text) {
+    if (!url || !window.fetch) return;
+    try {
+      fetch(url, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: text, text: text }) }).catch(function () { /* ignore */ });
+    } catch (e) { /* ignore */ }
+  }
+  function buildSecurityEvent(ev) {
+    return {
+      id: uid(), createdAt: nowISO(), type: String(ev.type || 'other'), severity: ev.severity === 'high' ? 'high' : 'low',
+      name: String(ev.name || '').trim(), detail: String(ev.detail || ''), page: (window.location.pathname || '').split('/').slice(-2).join('/'),
+      userAgent: (navigator.userAgent || '').slice(0, 160)
+    };
+  }
+  function alertText(rec) {
+    return '[DSIL Portal 보안] ' + { login_failed: '로그인 실패', login_lockout: '로그인 잠금', login_locked_attempt: '잠금 중 시도', macro_suspect: '매크로 의심' }[rec.type] + ' · ' + (rec.name || '(이름 없음)') + ' · ' + rec.detail + ' · ' + rec.page + ' · ' + new Date(rec.createdAt).toLocaleString('ko-KR');
+  }
 
   function limitedReview(rv) {
     return { id: rv.id, createdAt: rv.createdAt, requesterId: rv.requesterId, requesterName: rv.requesterName, title: rv.title, status: rv.status, processedAt: rv.processedAt, limited: true };
@@ -396,6 +415,17 @@
       },
 
       signOut: function () { session = null; writeSession(); emit(); return Promise.resolve(); },
+
+      /* ---------- 보안 이벤트 ---------- */
+      securityEvent: function (ev) {
+        var rec = buildSecurityEvent(ev);
+        data.security.unshift(rec);
+        if (data.security.length > 500) data.security.length = 500;
+        write(); emit();
+        if (rec.severity === 'high' && cfg.security && cfg.security.alertWebhookUrl) sendWebhook(cfg.security.alertWebhookUrl, alertText(rec));
+        return Promise.resolve(clone(rec));
+      },
+      listSecurityEvents: function () { return Promise.resolve(clone(data.security)); },
 
       /* ---------- 계정 관리 (관리자) ---------- */
       listAccounts: function () { return Promise.resolve(data.accounts.map(publicAccount)); },
@@ -1190,6 +1220,18 @@
       signUp: function (payload) { return this.signIn(payload); },
 
       signOut: function () { return client.auth.signOut().then(function () { session = null; profile = null; emit(); }); },
+
+      securityEvent: function (ev) {
+        var rec = buildSecurityEvent(ev);
+        if (rec.severity === 'high' && cfg.security && cfg.security.alertWebhookUrl) sendWebhook(cfg.security.alertWebhookUrl, alertText(rec));
+        return client.rpc('log_security_event', { p_type: rec.type, p_severity: rec.severity, p_name: rec.name, p_detail: rec.detail, p_page: rec.page, p_user_agent: rec.userAgent })
+          .then(unwrap).then(function () { return rec; }).catch(function () { return rec; });
+      },
+      listSecurityEvents: function () {
+        return client.from('security_events').select('*').order('created_at', { ascending: false }).limit(200).then(unwrap).then(function (rows) {
+          return rows.map(function (r) { return { id: r.id, createdAt: r.created_at, type: r.type, severity: r.severity, name: r.name || '', detail: r.detail || '', page: r.page || '', userAgent: r.user_agent || '' }; });
+        });
+      },
 
       listAccounts: function () {
         return client.from('profiles').select('*').order('created_at').then(unwrap).then(function (rows) {

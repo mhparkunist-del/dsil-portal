@@ -201,8 +201,15 @@
   }
   function stopClock() { if (state.clockTimer) { clearInterval(state.clockTimer); state.clockTimer = null; } }
 
+  var LOAD_AT = Date.now();
+  var SEC = Object.assign({ macroThresholdMs: 1200 }, CFG.security || {});
+
   function doCheckIn() {
     var hm = nowHM();
+    var elapsed = Date.now() - LOAD_AT;
+    if (elapsed < SEC.macroThresholdMs && store.securityEvent) {
+      store.securityEvent({ type: 'macro_suspect', severity: 'high', name: state.member ? state.member.name : '', detail: '페이지가 뜬 뒤 ' + elapsed + 'ms 만에 출석 체크' });
+    }
     if (hm < A.openAfter || hm >= A.closeAfter) { toast('출석 가능 시간은 ' + A.openAfter + ' ~ ' + A.closeAfter + ' 입니다.', true); return Promise.resolve(); }
     if (hm < A.lateAfter) {
       return store.attCheckIn('').then(function (rec) { afterCheckIn(rec); });
@@ -220,12 +227,13 @@
     var isTrip = type === 'trip';
     var t = today();
     var body = '<div class="row g-3">'
-      + '<div class="col-6"><label class="form-label required">시작일</label><input type="date" class="form-control" name="startDate" required value="' + t + '" min="' + t + '"></div>'
-      + '<div class="col-6"><label class="form-label required">종료일</label><input type="date" class="form-control" name="endDate" required value="' + t + '" min="' + t + '"></div>'
+      + '<div class="col-6"><label class="form-label required">시작일</label><input type="date" class="form-control" name="startDate" required value="' + t + '" min="' + t + '" data-role="range-start"></div>'
+      + '<div class="col-6"><label class="form-label required">종료일</label><input type="date" class="form-control" name="endDate" required value="' + t + '" min="' + t + '" data-role="range-end"></div>'
       + '<div class="col-12"><label class="form-label' + (isTrip ? ' required' : '') + '">' + (isTrip ? '출장 사유' : '메모') + '</label><textarea class="form-control" name="reason" rows="2"' + (isTrip ? ' required' : '') + ' placeholder="' + (isTrip ? '예: 삼성전자 협력 미팅 (화성)' : '선택') + '"></textarea></div>'
       + '<div class="col-12 text-secondary small">주말·공휴일은 일수에서 제외됩니다.' + (isTrip ? '' : ' 이번 반기 잔여 ' + (A.vacationDaysPerHalf - vacationUsed(state.member.memberId, halfKey(t))) + '일.') + '</div></div>';
     return dialog({ title: isTrip ? '출장 신청' : '휴가 신청', bodyHtml: body, size: 'lg', okLabel: '신청' }).then(function (v) {
       if (!v) return;
+      if (v.endDate < v.startDate) { toast('종료일이 시작일보다 빠를 수 없습니다.', true); return; }
       return store.attRequestLeave({ type: type, startDate: v.startDate, endDate: v.endDate, reason: v.reason }).then(function (l) {
         toast((isTrip ? '출장' : '휴가') + ' ' + l.days + '일을 등록했습니다.');
         state.tab = 'leave';
@@ -383,6 +391,16 @@
   /* ---------- actions ---------- */
   function handleError(err) { console.error(err); toast(err && err.message ? err.message : String(err), true); }
   function refresh() { return reload().then(render).catch(handleError); }
+
+  /* 기간 입력: 종료일이 시작일보다 빠르면 자동으로 맞춤 */
+  document.addEventListener('change', function (e) {
+    var el = e.target;
+    if (el.getAttribute('data-role') !== 'range-start') return;
+    var form = el.closest('form'); var end = form && form.querySelector('[data-role="range-end"]');
+    if (!end) return;
+    end.min = el.value;
+    if (end.value < el.value) end.value = el.value;
+  });
 
   document.addEventListener('submit', function (e) {
     var form = e.target;
