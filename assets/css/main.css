@@ -610,7 +610,8 @@ table.data tr:hover td { background: #fafbfd; }
 table.data td .sub { display: block; color: var(--muted); font-size: 0.78rem; }
 table.data td.actions { white-space: nowrap; text-align: right; }
 table.data td.actions .btn + .btn { margin-left: 4px; }
-table.data select { width: auto; min-width: 180px; font-size: 0.85rem; padding: 5px 8px; }
+table.data td.item { min-width: 220px; }
+table.data select { width: 100%; min-width: 200px; max-width: 320px; font-size: 0.85rem; padding: 5px 8px; }
 table.data tr.is-over td { background: var(--rejected-bg); }
 
 .empty {

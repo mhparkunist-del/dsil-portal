@@ -252,7 +252,7 @@
     var html = '<tr data-id="' + esc(r.id) + '">'
       + '<td class="nowrap">' + fmtDate(r.createdAt) + '</td>'
       + '<td class="nowrap">' + esc(r.requesterName) + '</td>'
-      + '<td>' + itemCell + '</td>'
+      + '<td class="item">' + itemCell + '</td>'
       + '<td class="num">' + esc(r.qty) + '</td>'
       + '<td class="num">' + won(r.unitPrice) + '</td>'
       + '<td class="num"><strong>' + won(r.amount) + '</strong></td>';
@@ -282,8 +282,9 @@
     state.projects.filter(function (p) { return p.active !== false; }).forEach(function (p) {
       var s = projectStats(p);
       var short = (Number(amount) || 0) > s.remain;
-      opts += '<option value="' + esc(p.id) + '"' + (short ? ' data-short="1"' : '') + '>'
-        + esc((p.code ? '[' + p.code + '] ' : '') + p.name) + ' · 잔액 ' + won(s.remain) + (short ? ' (부족)' : '') + '</option>';
+      var label = p.name.length > 22 ? p.name.slice(0, 22) + '…' : p.name;
+      opts += '<option value="' + esc(p.id) + '"' + (short ? ' data-short="1"' : '') + ' title="' + esc(p.name) + '">'
+        + esc((p.code ? p.code + ' ' : '') + label) + ' · 잔액 ' + won(s.remain) + (short ? ' (부족)' : '') + '</option>';
     });
     return opts;
   }
