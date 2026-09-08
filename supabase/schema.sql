@@ -503,8 +503,10 @@ begin
   select * into v_eq from public.equipment where id = p_equipment_id and active;
   if not found then raise exception '예약할 수 없는 장비입니다.'; end if;
   select grade into v_grade from public.equipment_users u where u.equipment_id = p_equipment_id and u.name_key = v_key;
-  if v_grade is null then raise exception '이 장비의 사용자로 등록되어 있지 않습니다. 담당자(%)에게 등록을 요청하세요.', v_eq.manager_name; end if;
-  if v_grade not in ('user', 'super') then raise exception '현재 등급(%)으로는 예약할 수 없습니다. 담당자에게 유저 승급을 요청하세요.', v_grade; end if;
+  if not public.is_admin() then  -- 포털 관리자는 담당자 등록 없이 예약 가능
+    if v_grade is null then raise exception '이 장비의 사용자로 등록되어 있지 않습니다. 담당자(%)에게 등록을 요청하세요.', v_eq.manager_name; end if;
+    if v_grade not in ('user', 'super') then raise exception '현재 등급(%)으로는 예약할 수 없습니다. 담당자에게 유저 승급을 요청하세요.', v_grade; end if;
+  end if;
   if p_end <= p_start then raise exception '시작·종료 시각을 확인하세요.'; end if;
   if p_end <= now() then raise exception '이미 지난 시간은 예약할 수 없습니다.'; end if;
   if p_end - p_start > interval '8 hours' then raise exception '1회 예약은 최대 8시간입니다.'; end if;

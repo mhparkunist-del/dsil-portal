@@ -46,7 +46,8 @@
   function gradeCls(g) { return { training: 'bg-secondary-lt', test: 'bg-yellow-lt', user: 'bg-green-lt', super: 'bg-blue-lt' }[g] || 'bg-secondary-lt'; }
   function gradeOptions(selected) { return GRADES.map(function (g) { return '<option value="' + g.id + '"' + (g.id === selected ? ' selected' : '') + '>' + g.label + '</option>'; }).join(''); }
   function myUser(eq) { var u = me(); return u ? ((eq.users || []).filter(function (x) { return nameKey(x.name) === nameKey(u.name); })[0] || null) : null; }
-  function canReserve(eq) { var u = myUser(eq); return !!u && (u.grade === 'user' || u.grade === 'super'); }
+  /* 유저·슈퍼유저 등급, 또는 포털 관리자 계정 */
+  function canReserve(eq) { if (state.session && state.session.isAdmin) return true; var u = myUser(eq); return !!u && (u.grade === 'user' || u.grade === 'super'); }
   function isAuthorized(eq) { return canReserve(eq); }
   function daysLeft(r) { return Math.max(0, Math.ceil((new Date(r.end).getTime() + EQ.logDueDays * 86400000 - Date.now()) / 86400000)); }
   function fmtRange(r) {
@@ -219,18 +220,32 @@
       + state.equipment.filter(function (e) { return e.active !== false; }).map(function (e) {
         return '<button type="button" class="btn btn-sm ' + (state.filterEq === e.id ? 'btn-primary' : 'btn-outline-secondary') + '" data-action="filter-eq" data-eq="' + esc(e.id) + '">' + eqBadge(e) + esc(e.name) + '</button>';
       }).join('');
-    var eqOpts = state.equipment.filter(function (e) { return e.active !== false; }).map(function (e) {
+    var active = state.equipment.filter(function (e) { return e.active !== false; });
+    var isAdmin = !!(state.session && state.session.isAdmin);
+    var eqOpts = active.map(function (e) {
       var sel = state.filterEq === e.id ? ' selected' : '';
       var mu = myUser(e);
-      return '<option value="' + esc(e.id) + '"' + sel + '>' + esc(e.name) + (canReserve(e) ? '' : (mu ? ' (' + gradeLabel(mu.grade) + ' · 예약 불가)' : ' (미등록)')) + '</option>';
+      return '<option value="' + esc(e.id) + '"' + sel + '>' + esc(e.name) + (canReserve(e) ? (isAdmin && !(mu && (mu.grade === 'user' || mu.grade === 'super')) ? ' (관리자)' : '') : (mu ? ' (' + gradeLabel(mu.grade) + ' · 예약 불가)' : ' (미등록)')) + '</option>';
     }).join('');
     var u = me();
     var body = '<div class="card-body"><div class="row g-4">'
       + '<div class="col-lg-8"><div class="d-flex flex-wrap gap-2 mb-3">' + chips + '</div><div id="calendar"></div>'
       + '<div class="text-secondary small mt-2"><i class="ti ti-pointer me-1"></i>빈 시간을 드래그하면 오른쪽 예약 폼에 시간이 채워집니다. 예약 블록을 누르면 상세가 열립니다.</div></div>'
       + '<div class="col-lg-4"><h3 class="card-title mb-3"><i class="ti ti-calendar-plus me-1 text-primary"></i>예약하기</h3>';
+    /* 장비가 하나도 없으면 폼 대신 안내 (빈 select 는 제출해도 브라우저 검증 말풍선만 뜸) */
+    if (!active.length) {
+      body += empty('device-desktop-off', '예약할 장비가 아직 없습니다', isAdmin ? '관리자 탭에서 장비를 추가한 뒤 사용자를 등록하세요.' : '관리자가 장비를 등록하면 여기서 예약할 수 있습니다.')
+        + (isAdmin ? '<div class="text-center"><button type="button" class="btn btn-primary" data-action="tab" data-tab="admin"><i class="ti ti-plus me-1"></i>장비 추가</button></div>' : '')
+        + '</div></div></div>';
+      return { body: body };
+    }
     if (blocked) {
       body += '<div class="alert alert-danger"><div class="fw-medium">새 예약이 막혀 있습니다</div><div class="small">사용 로그 기한(' + EQ.logDueDays + '일)이 지난 예약이 있습니다. 위의 로그 작성을 마치면 다시 예약할 수 있습니다.</div></div>';
+    }
+    /* 어느 장비에도 예약 권한이 없으면 등록 절차 안내 */
+    if (!isAdmin && !active.some(canReserve)) {
+      var mgrs = active.map(function (e) { var mu = myUser(e); return esc(e.name) + ' → ' + esc(e.managerName || '담당자 미지정') + (mu ? ' (현재 ' + esc(gradeLabel(mu.grade)) + ')' : ''); });
+      body += '<div class="alert alert-warning py-2"><div class="fw-medium"><i class="ti ti-user-off me-1"></i>아직 예약 권한이 있는 장비가 없습니다</div><div class="small">장비 담당자가 담당자 탭(PIN)에서 <strong>' + esc(u ? u.name : '') + '</strong> 이름을 <strong>유저</strong> 또는 <strong>슈퍼유저</strong> 등급으로 등록해야 예약할 수 있습니다. 교육·유저 테스트 대기 등급은 예약이 막힙니다.</div><ul class="small mb-0 mt-1 ps-3">' + mgrs.map(function (m) { return '<li>' + m + '</li>'; }).join('') + '</ul></div>';
     }
     var def = defaultSlot();
     body += '<form id="res-form"' + (blocked ? ' class="opacity-50"' : '') + '><div class="row g-3">'
@@ -520,7 +535,7 @@
     var editing = state.editingEqId ? eqById(state.editingEqId) : null;
     var colorOpts = COLORS.map(function (c) { return '<option value="' + c.id + '"' + (editing && editing.color === c.id ? ' selected' : '') + '>' + c.label + '</option>'; }).join('');
     var body = '<div class="card-body py-2 d-flex align-items-center justify-content-between flex-wrap gap-2 border-bottom">'
-      + '<div class="text-secondary small"><i class="ti ti-lock-open me-1"></i>관리자 모드 · 장비 목록, 담당자, 담당자 PIN을 설정합니다. 사용자 등록은 장비 담당자가 합니다.</div>'
+      + '<div class="text-secondary small"><i class="ti ti-lock-open me-1"></i>관리자 모드 · 장비 목록, 담당자, 담당자 PIN을 설정합니다. 사용자 등록은 장비 담당자가 하며, 아래에서 관리자가 직접 할 수도 있습니다.</div>'
       + '<button type="button" class="btn btn-sm btn-ghost-secondary" data-action="lock-admin"><i class="ti ti-lock me-1"></i>잠금</button></div>';
     body += '<div class="card-body"><div class="row g-4"><div class="col-lg-5">'
       + '<h3 class="card-title mb-3"><i class="ti ti-' + (editing ? 'edit' : 'device-desktop-plus') + ' me-1 text-primary"></i>' + (editing ? '장비 수정' : '장비 추가')
@@ -545,6 +560,30 @@
             + '<td>' + esc(e.managerName || '-') + (e.hasManagerPin ? '' : ' <span class="badge bg-red-lt">PIN 없음</span>') + '</td><td class="text-end tnum">' + (e.users || []).length + '</td><td class="text-end tnum">' + cnt + '</td>'
             + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="edit-eq" data-eq="' + esc(e.id) + '" title="수정"><i class="ti ti-edit"></i></button>'
             + '<button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="delete-eq" data-eq="' + esc(e.id) + '" title="삭제"><i class="ti ti-trash"></i></button></td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+    body += '</div></div></div>';
+    /* 관리자 직접 등록: 담당자 PIN 이 없거나 담당자가 자리에 없을 때 */
+    var activeEq = state.equipment.filter(function (e) { return e.active !== false; });
+    body += '<div class="card-body border-top"><div class="row g-4"><div class="col-lg-5">'
+      + '<h3 class="card-title mb-1"><i class="ti ti-user-plus me-1 text-primary"></i>사용자 등록 (관리자)</h3>'
+      + '<p class="text-secondary small mb-3">원래는 장비 담당자가 담당자 탭(PIN)에서 등록하지만, 관리자는 여기서 PIN 없이 바로 등록·등급 변경할 수 있습니다. <strong>유저·슈퍼유저</strong>만 예약할 수 있습니다. 관리자 계정 자신은 등록 없이도 모든 장비를 예약할 수 있습니다.</p>'
+      + (activeEq.length ? '<form id="admin-grant-form"><div class="row g-2">'
+        + '<div class="col-12"><label class="form-label required">장비</label><select class="form-select" name="equipmentId" required>' + activeEq.map(function (e) { return '<option value="' + esc(e.id) + '">' + esc(e.name) + '</option>'; }).join('') + '</select></div>'
+        + '<div class="col-7"><label class="form-label required">이름</label><input type="text" class="form-control" name="name" required placeholder="포털 로그인 이름과 같게"></div>'
+        + '<div class="col-5"><label class="form-label required">등급</label><select class="form-select" name="grade">' + gradeOptions('user') + '</select></div>'
+        + '</div><div class="d-flex justify-content-end mt-3"><button type="submit" class="btn btn-primary"><i class="ti ti-user-check me-1"></i>등록</button></div></form>' : '<div class="text-secondary small">먼저 장비를 추가하세요.</div>')
+      + '</div><div class="col-lg-7"><h3 class="card-title mb-2"><i class="ti ti-users me-1 text-primary"></i>장비별 등록 사용자</h3>';
+    var anyUsers = activeEq.some(function (e) { return (e.users || []).length; });
+    if (!anyUsers) body += '<div class="text-secondary small">아직 등록된 사용자가 없습니다. 구성원이 예약하려면 위에서 유저 등급으로 등록해 주세요.</div>';
+    else {
+      body += '<div class="table-responsive"><table class="table table-sm table-vcenter"><thead><tr><th>장비</th><th>이름</th><th>등급</th><th>처리자</th><th class="w-1"></th></tr></thead><tbody>'
+        + activeEq.map(function (e) {
+          return (e.users || []).map(function (u) {
+            return '<tr data-user="' + esc(u.id) + '" data-eq="' + esc(e.id) + '"><td class="text-nowrap">' + eqBadge(e) + esc(e.name) + '</td><td class="fw-medium">' + esc(u.name) + '</td>'
+              + '<td><select class="form-select form-select-sm" data-role="admin-grade" style="min-width:9rem">' + gradeOptions(u.grade) + '</select></td><td class="text-secondary small">' + esc(u.grantedBy || '-') + ' · ' + esc(fmtDate(u.grantedAt)) + '</td>'
+              + '<td class="text-end"><button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="admin-revoke-user" data-user="' + esc(u.id) + '" data-eq="' + esc(e.id) + '" title="등록 해제"><i class="ti ti-user-off"></i></button></td></tr>';
+          }).join('');
         }).join('') + '</tbody></table></div>';
     }
     body += '</div></div></div>';
@@ -591,6 +630,15 @@
       store.grantUser(state.manager.equipmentId, state.manager.pin, g.name, g.grade)
         .then(function (u) { toast((u ? u.name : g.name) + ' 님을 ' + gradeLabel(u ? u.grade : g.grade) + ' 등급으로 등록했습니다.'); touchManager(); return refresh(); }).catch(handleError);
     }
+    if (form.id === 'admin-grant-form') {
+      /* 관리자 경로: 담당자 PIN 없이 등록 (관리자 PIN 확인된 상태) */
+      e.preventDefault();
+      var ag = readForm(form);
+      if (!isAdminActive()) { toast('관리자 확인이 필요합니다.', true); return; }
+      if (!ag.equipmentId) { toast('장비를 고르세요.', true); return; }
+      store.grantUser(ag.equipmentId, null, ag.name, ag.grade)
+        .then(function (u) { toast((u ? u.name : ag.name) + ' 님을 ' + gradeLabel(u ? u.grade : ag.grade) + ' 등급으로 등록했습니다.'); setUnlock(true); return refresh(); }).catch(handleError);
+    }
     if (form.id === 'eq-form') {
       e.preventDefault();
       var q = readForm(form);
@@ -617,6 +665,11 @@
       var row = el.closest('tr[data-user]');
       store.setUserGrade(state.manager.equipmentId, state.manager.pin, row.getAttribute('data-user'), el.value)
         .then(function (u) { toast(u.name + ' 님을 ' + gradeLabel(u.grade) + ' 등급으로 바꿨습니다.'); touchManager(); return refresh(); }).catch(handleError);
+    }
+    if (el.getAttribute('data-role') === 'admin-grade' && isAdminActive()) {
+      var arow = el.closest('tr[data-user]');
+      store.setUserGrade(arow.getAttribute('data-eq'), null, arow.getAttribute('data-user'), el.value)
+        .then(function (u) { toast(u.name + ' 님을 ' + gradeLabel(u.grade) + ' 등급으로 바꿨습니다.'); setUnlock(true); return refresh(); }).catch(handleError);
     }
   });
 
@@ -662,6 +715,15 @@
         promptDlg({ title: '로그 면제', message: r2.userName + '님의 ' + fmtRange(r2) + ' 사용을 로그 작성 없이 완료 처리합니다. 사유를 적어 주세요.', input: 'textarea', placeholder: '예: 담당자가 직접 확인', okLabel: '면제 처리' }).then(function (note) {
           if (note === null) return;
           return store.waiveUsageLog(resId, state.manager.pin, note).then(function () { toast('면제 처리했습니다.'); touchManager(); return refresh(); });
+        }).catch(handleError);
+        break;
+      }
+      case 'admin-revoke-user': {
+        if (!isAdminActive()) return;
+        var auid = btn.getAttribute('data-user'), aeq = btn.getAttribute('data-eq');
+        confirmDlg({ title: '등록 해제', message: '이 사용자의 등록을 해제할까요? 기존 예약은 유지됩니다.', okLabel: '해제', danger: true }).then(function (ok) {
+          if (!ok) return;
+          return store.revokeUser(aeq, null, auid).then(function () { toast('등록을 해제했습니다.'); setUnlock(true); return refresh(); });
         }).catch(handleError);
         break;
       }

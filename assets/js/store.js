@@ -819,14 +819,16 @@
         return hashPin(pin).then(function (h) { return h === eq.managerPinHash; });
       },
 
-      /* 사용자 등록: 이름 + 등급(교육/유저 테스트 대기/유저/슈퍼유저). 같은 이름이면 등급 변경 */
+      /* 사용자 등록: 이름 + 등급(교육/유저 테스트 대기/유저/슈퍼유저). 같은 이름이면 등급 변경.
+         managerPin 이 null 이면 포털 관리자 세션(관리자 PIN 확인 후)만 허용 — 담당자 PIN 이 없거나 잊었을 때의 경로 */
       grantUser: function (equipmentId, managerPin, name, grade) {
         var eq = data.equipment.filter(function (x) { return x.id === equipmentId; })[0];
         if (!eq) return Promise.reject(new Error('장비를 찾을 수 없습니다.'));
         var nm = String(name || '').trim();
         if (!nm) return Promise.reject(new Error('이름을 입력하세요.'));
-        return hashPin(managerPin).then(function (h) {
-          if (h !== eq.managerPinHash) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
+        var check = managerPin === null ? Promise.resolve(!!(session && session.isAdmin)) : hashPin(managerPin).then(function (h) { return h === eq.managerPinHash; });
+        return check.then(function (ok) {
+          if (!ok) throw new Error(managerPin === null ? '관리자만 담당자 PIN 없이 등록할 수 있습니다.' : '장비 담당자 PIN이 올바르지 않습니다.');
           var key = nameKey(nm);
           var u = eq.users.filter(function (x) { return nameKey(x.name) === key; })[0];
           var by = session ? session.user.name : '';
@@ -840,8 +842,9 @@
       setUserGrade: function (equipmentId, managerPin, userId, grade) {
         var eq = data.equipment.filter(function (x) { return x.id === equipmentId; })[0];
         if (!eq) return Promise.reject(new Error('장비를 찾을 수 없습니다.'));
-        return hashPin(managerPin).then(function (h) {
-          if (h !== eq.managerPinHash) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
+        var check = managerPin === null ? Promise.resolve(!!(session && session.isAdmin)) : hashPin(managerPin).then(function (h) { return h === eq.managerPinHash; });
+        return check.then(function (ok) {
+          if (!ok) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
           var u = eq.users.filter(function (x) { return x.id === userId; })[0];
           if (!u) throw new Error('사용자를 찾을 수 없습니다.');
           u.grade = normGrade(grade); u.grantedAt = nowISO(); u.grantedBy = session ? session.user.name : '';
@@ -853,8 +856,9 @@
       revokeUser: function (equipmentId, managerPin, userId) {
         var eq = data.equipment.filter(function (x) { return x.id === equipmentId; })[0];
         if (!eq) return Promise.reject(new Error('장비를 찾을 수 없습니다.'));
-        return hashPin(managerPin).then(function (h) {
-          if (h !== eq.managerPinHash) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
+        var check = managerPin === null ? Promise.resolve(!!(session && session.isAdmin)) : hashPin(managerPin).then(function (h) { return h === eq.managerPinHash; });
+        return check.then(function (ok) {
+          if (!ok) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
           eq.users = eq.users.filter(function (x) { return x.id !== userId; });
           write(); emit();
         });
@@ -871,8 +875,11 @@
         if (!eq || eq.active === false) return Promise.reject(new Error('예약할 수 없는 장비입니다.'));
         var me = session.user;
         var u = eq.users.filter(function (x) { return nameKey(x.name) === nameKey(me.name); })[0];
-        if (!u) return Promise.reject(new Error('이 장비의 사용자로 등록되어 있지 않습니다. 장비 담당자(' + (eq.managerName || '미지정') + ')에게 등록을 요청하세요.'));
-        if (!canReserveGrade(normGrade(u.grade))) return Promise.reject(new Error('현재 등급이 "' + gradeLabel(normGrade(u.grade)) + '"라 예약할 수 없습니다. 담당자에게 유저 승급을 요청하세요.'));
+        /* 포털 관리자 계정은 담당자 등록 없이도 모든 장비를 예약할 수 있음 */
+        if (!session.isAdmin) {
+          if (!u) return Promise.reject(new Error('이 장비의 사용자로 등록되어 있지 않습니다. 장비 담당자(' + (eq.managerName || '미지정') + ')에게 등록을 요청하세요.'));
+          if (!canReserveGrade(normGrade(u.grade))) return Promise.reject(new Error('현재 등급이 "' + gradeLabel(normGrade(u.grade)) + '"라 예약할 수 없습니다. 담당자에게 유저 승급을 요청하세요.'));
+        }
         try {
           var start = new Date(r.start), end = new Date(r.end), now = new Date();
           if (isNaN(start) || isNaN(end) || end <= start) throw new Error('시작·종료 시각을 확인하세요.');
@@ -1674,12 +1681,28 @@
         return client.rpc('verify_equipment_manager', { p_equipment_id: equipmentId, p_pin: String(pin) }).then(unwrap).then(function (v) { return v === true; });
       },
 
+      /* managerPin 이 null 이면 관리자 경로: RLS(equipment_users: admin all)로 직접 씀 */
       grantUser: function (equipmentId, managerPin, name, grade) {
-        return client.rpc('grant_equipment_user', { p_equipment_id: equipmentId, p_manager_pin: String(managerPin), p_name: String(name || '').trim(), p_grade: normGrade(grade) })
+        var nm = String(name || '').trim();
+        if (managerPin === null) {
+          if (!(profile && profile.is_admin)) return Promise.reject(new Error('관리자만 담당자 PIN 없이 등록할 수 있습니다.'));
+          var key = nm.replace(/\s+/g, '').toLowerCase();
+          return client.from('equipment_users').select('id').eq('equipment_id', equipmentId).eq('name_key', key).maybeSingle().then(unwrap).then(function (ex) {
+            var by = profile.name || profile.email || '';
+            var q = ex ? client.from('equipment_users').update({ name: nm, grade: normGrade(grade), granted_at: new Date().toISOString(), granted_by: by }).eq('id', ex.id)
+                       : client.from('equipment_users').insert({ equipment_id: equipmentId, name: nm, name_key: key, grade: normGrade(grade), granted_by: by });
+            return q.select('id, equipment_id, name, grade, granted_at, granted_by').single().then(unwrap).then(toEqUser);
+          });
+        }
+        return client.rpc('grant_equipment_user', { p_equipment_id: equipmentId, p_manager_pin: String(managerPin), p_name: nm, p_grade: normGrade(grade) })
           .then(unwrap).then(function (rows) { return rows && rows.length ? toEqUser(rows[0]) : null; });
       },
 
       setUserGrade: function (equipmentId, managerPin, userId, grade) {
+        if (managerPin === null) {
+          if (!(profile && profile.is_admin)) return Promise.reject(new Error('관리자만 바꿀 수 있습니다.'));
+          return client.from('equipment_users').update({ grade: normGrade(grade), granted_at: new Date().toISOString(), granted_by: profile.name || profile.email || '' }).eq('id', userId).eq('equipment_id', equipmentId).select('id, equipment_id, name, grade, granted_at, granted_by').single().then(unwrap).then(toEqUser);
+        }
         return client.rpc('set_equipment_user_grade', { p_equipment_id: equipmentId, p_manager_pin: String(managerPin), p_user_id: userId, p_grade: normGrade(grade) })
           .then(unwrap).then(function (rows) { return rows && rows.length ? toEqUser(rows[0]) : null; });
       },
@@ -1690,6 +1713,10 @@
       },
 
       revokeUser: function (equipmentId, managerPin, userId) {
+        if (managerPin === null) {
+          if (!(profile && profile.is_admin)) return Promise.reject(new Error('관리자만 해제할 수 있습니다.'));
+          return client.from('equipment_users').delete().eq('id', userId).eq('equipment_id', equipmentId).then(unwrap).then(function () {});
+        }
         return client.rpc('revoke_equipment_user', { p_equipment_id: equipmentId, p_manager_pin: String(managerPin), p_user_id: userId }).then(unwrap).then(function () {});
       },
 
