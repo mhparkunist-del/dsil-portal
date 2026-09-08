@@ -153,6 +153,15 @@ alter table public.requests add column if not exists category text not null defa
 alter table public.requests add column if not exists review_id uuid references public.reviews (id) on delete restrict;
 alter table public.requests add column if not exists kind text not null default 'purchase';   -- purchase(구매) | meeting(회의비)
 alter table public.requests add column if not exists meta jsonb not null default '{}'::jsonb;  -- 회의비: 회의명·일시·참석자 등
+alter table public.requests add column if not exists report jsonb;                             -- 구매 보고서 (status, 카드실사용자, 검수일자, 사진 키 등)
+alter table public.projects add column if not exists account_manager text not null default '';  -- 계정책임자
+alter table public.projects add column if not exists card_users jsonb not null default '[]'::jsonb; -- 카드 실사용자(참여연구원) 이름 목록
+alter table public.profiles add column if not exists signature_key text;                        -- 서명 이미지 (Storage 키)
+-- 사진 저장: Storage 에 public 버킷 'report-photos' 를 만들고 authenticated 에게 insert/select/delete 를 허용하세요.
+-- 보고서 작성자는 requests 를 update 할 수 있어야 하므로 아래 정책을 추가합니다 (본인 요청의 report 열만 바꾸는 용도).
+drop policy if exists "requests: update own report" on public.requests;
+create policy "requests: update own report" on public.requests for update to authenticated
+  using (requester_id = auth.uid() and status = 'done') with check (requester_id = auth.uid() and status = 'done');
 
 create index if not exists requests_status_idx   on public.requests (status);
 create index if not exists requests_project_idx  on public.requests (project_id);

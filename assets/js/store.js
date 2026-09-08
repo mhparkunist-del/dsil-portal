@@ -271,12 +271,15 @@
         p.budgets[first] = Number(p.budget) || 0;
       }
       delete p.budget;
+      if (p.accountManager === undefined) p.accountManager = '';
+      if (!Array.isArray(p.cardUsers)) p.cardUsers = [];   /* 카드 실사용자(참여연구원) 목록 */
     });
     (data.requests || []).forEach(function (r) {
       if (!r.category || ids.indexOf(r.category) < 0) r.category = first;
       if (r.reviewId === undefined) r.reviewId = null;
       if (!r.kind) r.kind = 'purchase';           /* purchase(구매) | meeting(회의비) */
       if (!r.meta || typeof r.meta !== 'object') r.meta = {};
+      if (r.report === undefined) r.report = null; /* 구매 보고서 { status:'draft'|'submitted'|'verified', ... } */
     });
     if (!Array.isArray(data.reviews)) data.reviews = [];
     if (!Array.isArray(data.exports)) data.exports = [];
@@ -303,7 +306,28 @@
   }
 
   function publicInvManager(m) { return { id: m.id, name: m.name, area: m.area || '', createdAt: m.createdAt }; }
-  function publicAccount(a) { return { id: a.id, name: a.name, role: a.role || 'member', status: a.status || 'pending', createdAt: a.createdAt, approvedAt: a.approvedAt || null, approvedBy: a.approvedBy || null }; }
+  function publicAccount(a) { return { id: a.id, name: a.name, role: a.role || 'member', status: a.status || 'pending', createdAt: a.createdAt, approvedAt: a.approvedAt || null, approvedBy: a.approvedBy || null, signatureKey: a.signatureKey || null }; }
+
+  /* ---------- 사진 저장소 (IndexedDB) – localStorage 용량 한계를 피하기 위해 사진은 따로 보관 ---------- */
+  var IDB_NAME = 'dsil-portal-photos', IDB_STORE = 'photos';
+  function idb() {
+    return new Promise(function (resolve, reject) {
+      if (!window.indexedDB) { reject(new Error('이 브라우저는 사진 저장을 지원하지 않습니다.')); return; }
+      var req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = function () { req.result.createObjectStore(IDB_STORE); };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error || new Error('IndexedDB 열기 실패')); };
+    });
+  }
+  function idbPut(key, value) {
+    return idb().then(function (db) { return new Promise(function (resolve, reject) { var tx = db.transaction(IDB_STORE, 'readwrite'); tx.objectStore(IDB_STORE).put(value, key); tx.oncomplete = function () { resolve(key); }; tx.onerror = function () { reject(tx.error); }; }); });
+  }
+  function idbGet(key) {
+    return idb().then(function (db) { return new Promise(function (resolve, reject) { var tx = db.transaction(IDB_STORE, 'readonly'); var rq = tx.objectStore(IDB_STORE).get(key); rq.onsuccess = function () { resolve(rq.result || null); }; rq.onerror = function () { reject(rq.error); }; }); });
+  }
+  function idbDelete(key) {
+    return idb().then(function (db) { return new Promise(function (resolve, reject) { var tx = db.transaction(IDB_STORE, 'readwrite'); tx.objectStore(IDB_STORE).delete(key); tx.oncomplete = function () { resolve(); }; tx.onerror = function () { reject(tx.error); }; }); });
+  }
 
   /* 보안 이벤트 알림 (Discord/Slack incoming webhook). 실패해도 앱 흐름은 막지 않음 */
   function sendWebhook(url, text) {
@@ -491,9 +515,53 @@
         var rec = Object.assign({}, idx >= 0 ? data.projects[idx] : { id: uid(), createdAt: nowISO() }, p);
         if (!rec.id) rec.id = uid();
         if (!rec.budgets || typeof rec.budgets !== 'object') rec.budgets = {};
+        if (!Array.isArray(rec.cardUsers)) rec.cardUsers = [];
         if (idx >= 0) data.projects[idx] = rec; else data.projects.push(rec);
         write(); emit();
         return Promise.resolve(clone(rec));
+      },
+
+      /* ---------- 구매 보고서 · 사진 ---------- */
+      savePhoto: function (dataUrl) { var key = 'ph-' + uid(); return idbPut(key, dataUrl).then(function () { return key; }); },
+      loadPhoto: function (key) { return key ? idbGet(key) : Promise.resolve(null); },
+      deletePhoto: function (key) { return key ? idbDelete(key).catch(function () {}) : Promise.resolve(); },
+
+      saveReport: function (requestId, report) {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var idx = data.requests.findIndex(function (x) { return x.id === requestId; });
+        if (idx < 0) return Promise.reject(new Error('요청을 찾을 수 없습니다.'));
+        var r = data.requests[idx];
+        if (r.status !== 'done') return Promise.reject(new Error('관리자가 과제를 배정(승인)한 뒤에 보고서를 작성할 수 있습니다.'));
+        var prev = r.report || {};
+        var rec = Object.assign({}, prev, report, { updatedAt: nowISO(), updatedBy: session.user.name });
+        if (!rec.createdAt) rec.createdAt = nowISO();
+        if (rec.status === 'submitted' && prev.status !== 'submitted') { rec.submittedAt = nowISO(); rec.submittedBy = session.user.name; }
+        if (rec.status !== 'verified') { delete rec.verifiedAt; delete rec.verifiedBy; }
+        r.report = rec;
+        write(); emit();
+        return Promise.resolve(clone(rec));
+      },
+
+      verifyReport: function (requestId, ok, note) {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var r = data.requests.filter(function (x) { return x.id === requestId; })[0];
+        if (!r || !r.report) return Promise.reject(new Error('제출된 보고서가 없습니다.'));
+        if (ok) { r.report.status = 'verified'; r.report.verifiedAt = nowISO(); r.report.verifiedBy = session.user.name; r.report.adminNote = String(note || '').trim(); }
+        else { r.report.status = 'draft'; r.report.adminNote = String(note || '').trim(); delete r.report.verifiedAt; delete r.report.verifiedBy; }
+        write(); emit();
+        return Promise.resolve(clone(r.report));
+      },
+
+      setMySignature: function (key) {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var a = accountById(session.user.id); if (!a) return Promise.reject(new Error('계정을 찾을 수 없습니다.'));
+        a.signatureKey = key || null; write(); emit();
+        return Promise.resolve(publicAccount(a));
+      },
+      getAccount: function (id) { var a = accountById(id); return Promise.resolve(a ? publicAccount(a) : null); },
+      signatureByName: function (name) {
+        var a = data.accounts.filter(function (x) { return nameKey(x.name) === nameKey(name); })[0];
+        return Promise.resolve(a && a.signatureKey ? a.signatureKey : null);
       },
 
       deleteProject: function (id) {
@@ -1066,6 +1134,7 @@
       id: row.id, code: row.code || '', name: row.name,
       budgets: (row.budgets && typeof row.budgets === 'object') ? row.budgets : {},
       startDate: row.start_date || '', endDate: row.end_date || '', manager: row.manager || '',
+      accountManager: row.account_manager || '', cardUsers: Array.isArray(row.card_users) ? row.card_users : [],
       note: row.note || '', active: row.active !== false, createdAt: row.created_at
     };
   }
@@ -1076,6 +1145,7 @@
     var out = {
       code: p.code || '', name: p.name, budgets: budgets,
       start_date: p.startDate || null, end_date: p.endDate || null, manager: p.manager || '',
+      account_manager: p.accountManager || '', card_users: Array.isArray(p.cardUsers) ? p.cardUsers : [],
       note: p.note || '', active: p.active !== false
     };
     if (p.id) out.id = p.id;
@@ -1086,6 +1156,7 @@
     return {
       id: row.id, createdAt: row.created_at, requesterId: row.requester_id, requesterName: row.requester_name || '',
       kind: row.kind === 'meeting' ? 'meeting' : 'purchase', meta: (row.meta && typeof row.meta === 'object') ? row.meta : {},
+      report: (row.report && typeof row.report === 'object') ? row.report : null,
       item: row.item, category: row.category || '', link: row.link || '', qty: Number(row.qty) || 1, unitPrice: Number(row.unit_price) || 0,
       amount: Number(row.amount) || 0, note: row.note || '', status: row.status, projectId: row.project_id || null, reviewId: row.review_id || null,
       adminNote: row.admin_note || '', processedAt: row.processed_at || null, processedBy: row.processed_by_name || null
@@ -1094,7 +1165,7 @@
 
   function fromRequestPatch(patch) {
     var map = {
-      item: 'item', category: 'category', link: 'link', qty: 'qty', unitPrice: 'unit_price', amount: 'amount', note: 'note', kind: 'kind', meta: 'meta',
+      item: 'item', category: 'category', link: 'link', qty: 'qty', unitPrice: 'unit_price', amount: 'amount', note: 'note', kind: 'kind', meta: 'meta', report: 'report',
       status: 'status', projectId: 'project_id', reviewId: 'review_id', adminNote: 'admin_note', processedAt: 'processed_at',
       processedBy: 'processed_by_name', requesterName: 'requester_name'
     };
@@ -1271,6 +1342,45 @@
 
       saveProject: function (p) {
         return client.from('projects').upsert(fromProject(p)).select().single().then(unwrap).then(toProject);
+      },
+
+      /* 구매 보고서 · 사진 (Supabase Storage 버킷 'report-photos', public) */
+      savePhoto: function (dataUrl) {
+        var m = /^data:(image\/[a-z]+);base64,(.*)$/i.exec(dataUrl || '');
+        if (!m) return Promise.reject(new Error('사진 형식을 읽을 수 없습니다.'));
+        var bin = atob(m[2]); var arr = new Uint8Array(bin.length); for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        var key = 'ph-' + (window.crypto && crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36)) + (m[1] === 'image/png' ? '.png' : '.jpg');
+        return client.storage.from('report-photos').upload(key, arr, { contentType: m[1], upsert: false }).then(unwrap).then(function () { return key; });
+      },
+      loadPhoto: function (key) {
+        if (!key) return Promise.resolve(null);
+        var res = client.storage.from('report-photos').getPublicUrl(key);
+        return Promise.resolve(res && res.data ? res.data.publicUrl : null);
+      },
+      deletePhoto: function (key) { return key ? client.storage.from('report-photos').remove([key]).then(function () {}).catch(function () {}) : Promise.resolve(); },
+      saveReport: function (requestId, report) {
+        return client.from('requests').select('report, status').eq('id', requestId).single().then(unwrap).then(function (row) {
+          if (row.status !== 'done') throw new Error('관리자가 과제를 배정(승인)한 뒤에 보고서를 작성할 수 있습니다.');
+          var u = currentUser(); var prev = row.report || {};
+          var rec = Object.assign({}, prev, report, { updatedAt: new Date().toISOString(), updatedBy: u ? u.name : '' });
+          if (!rec.createdAt) rec.createdAt = rec.updatedAt;
+          if (rec.status === 'submitted' && prev.status !== 'submitted') { rec.submittedAt = rec.updatedAt; rec.submittedBy = u ? u.name : ''; }
+          return client.from('requests').update({ report: rec }).eq('id', requestId).select().single().then(unwrap).then(function (r) { return r.report; });
+        });
+      },
+      verifyReport: function (requestId, ok, note) {
+        return client.from('requests').select('report').eq('id', requestId).single().then(unwrap).then(function (row) {
+          var rec = row.report; if (!rec) throw new Error('제출된 보고서가 없습니다.');
+          var u = currentUser();
+          if (ok) { rec.status = 'verified'; rec.verifiedAt = new Date().toISOString(); rec.verifiedBy = u ? u.name : ''; rec.adminNote = String(note || '').trim(); }
+          else { rec.status = 'draft'; rec.adminNote = String(note || '').trim(); delete rec.verifiedAt; delete rec.verifiedBy; }
+          return client.from('requests').update({ report: rec }).eq('id', requestId).then(unwrap).then(function () { return rec; });
+        });
+      },
+      setMySignature: function (key) { var u = currentUser(); if (!u) return Promise.reject(new Error('로그인이 필요합니다.')); return client.from('profiles').update({ signature_key: key || null }).eq('id', u.id).then(unwrap).then(function () {}); },
+      getAccount: function (id) { return client.from('profiles').select('id, name, email, is_admin, status, created_at, signature_key').eq('id', id).maybeSingle().then(unwrap).then(function (p) { return p ? { id: p.id, name: p.name || p.email, role: p.is_admin ? 'admin' : 'member', status: p.status, createdAt: p.created_at, signatureKey: p.signature_key || null } : null; }); },
+      signatureByName: function (name) {
+        return client.from('profiles').select('signature_key').eq('name', String(name || '').trim()).limit(1).then(unwrap).then(function (rows) { return rows && rows.length ? (rows[0].signature_key || null) : null; });
       },
 
       deleteProject: function (id) {

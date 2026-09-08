@@ -65,6 +65,16 @@ window.DSIL_CONFIG = {
     }
   },
 
+  /* 구매 보고서 (구매 후 증빙 양식) */
+  report: {
+    inspectionThreshold: 500000,     /* 이 금액 초과: 검수 필요 → 자체 검수 물품 사진 첨부 */
+    centralThreshold: 5000000,       /* 이 금액 초과: 중앙검수 대상 (물품 사진 + 검수 담당자 절차) */
+    minItemPhotos: 2,                /* 검수 사진 최소 장수 */
+    maxPhotoEdge: 1400,              /* 첨부 사진 긴 변 픽셀 (브라우저에서 자동 축소) */
+    defaultAccountManager: '권지민',  /* 계정책임자 기본값 (과제별로 바꿀 수 있음) */
+    defaultInspector: '전효진'        /* 검수자 기본값 */
+  },
+
   /* 보안: 로그인 잠금·매크로 의심 감지·알림 */
   security: {
     maxLoginFailures: 5,       /* 같은 이름으로 연속 실패 허용 횟수. 넘으면 잠금 */

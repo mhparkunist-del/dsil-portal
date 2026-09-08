@@ -442,7 +442,7 @@
         var st = STATUS[r.status] || { label: r.status, cls: 'bg-secondary-lt' };
         return '<div class="list-group-item px-0 d-flex justify-content-between align-items-center gap-2">'
           + '<div class="text-truncate"><span class="text-secondary small me-2">' + fmtDate(r.createdAt) + '</span>' + esc(r.item) + '</div>'
-          + '<div class="text-nowrap"><span class="tnum me-2">' + won(r.amount) + '</span><span class="badge ' + st.cls + '">' + st.label + '</span></div></div>';
+          + '<div class="text-nowrap"><span class="tnum me-2">' + won(r.amount) + '</span>' + (r.status === 'done' ? reportBadge(r) : '<span class="badge ' + st.cls + '">' + st.label + '</span>') + '</div></div>';
       }).join('') + '</div>';
     }
     var myApproved = state.reviews.filter(function (rv) { return isMine(rv) && rv.status === 'approved'; });
@@ -474,6 +474,7 @@
       + step(1, '구매 심의 (필요 시)', '금액이 크거나 나눠 집행할 계획이면 먼저 <a href="#review" data-action="tab" data-tab="review">구매 심의</a>를 올려 과제에 가할당을 받습니다.')
       + step(2, '구매 요청 제출', '품명·비목·수량·단가를 적어 제출합니다. 미처리 상태에서는 직접 수정·취소할 수 있습니다.')
       + step(3, '관리자 배정', '관리자가 과제와 비목을 배정하면 <span class="badge bg-blue-lt">처리</span>로 바뀌고 해당 비목에서 실집행으로 차감됩니다.')
+      + step(4, '구매 후 보고서', '물품이 오면 요청 조회의 <span class="badge bg-yellow-lt">보고서 미작성</span> 배지를 눌러 영수증·거래내역·검수 사진을 첨부합니다. 50만원 초과는 검수 사진, 네이버페이는 주문 캡처가 필요합니다.')
       + '</div>'
       + '</div></div></div>';
     return { body: body };
@@ -565,6 +566,19 @@
     return '<td class="text-end text-nowrap"><div class="fw-medium tnum">' + won(r.amount) + '</div><div class="small text-secondary tnum">' + esc(r.qty) + ' × ' + won(r.unitPrice) + '</div></td>';
   }
 
+  /* 구매 보고서 상태 배지 + 링크 (승인된 건만) */
+  var RSTATUS = { none: { label: '보고서 미작성', cls: 'bg-yellow-lt' }, draft: { label: '보고서 작성 중', cls: 'bg-secondary-lt' }, submitted: { label: '보고서 제출', cls: 'bg-blue-lt' }, verified: { label: '보고서 확인', cls: 'bg-green-lt' } };
+  function reportBadge(r) {
+    if (r.status !== 'done') return '';
+    var st = r.report ? (r.report.status || 'draft') : 'none';
+    var S = RSTATUS[st] || RSTATUS.none;
+    return '<a href="../report/index.html#id=' + esc(r.id) + '" class="badge ' + S.cls + ' text-decoration-none" title="구매 보고서 열기"><i class="ti ti-file-text me-1"></i>' + S.label + '</a>';
+  }
+  function cardUsersHint(projectId) {
+    var p = projectId ? projectById(projectId) : null;
+    return '<div class="small text-secondary mt-1" data-role="card-users">' + (p && p.cardUsers && p.cardUsers.length ? '카드 실사용자: ' + esc(p.cardUsers.join(', ')) : (p ? '카드 실사용자 목록 없음' : '')) + '</div>';
+  }
+
   /* 조회 결과 행. admin=true 면 미처리 행에 배정 컨트롤이 붙고, 본인 미처리 요청은 누구나 수정·취소 가능 */
   function requestRow(r, admin) {
     var st = STATUS[r.status] || { label: r.status, cls: 'bg-secondary-lt' };
@@ -580,13 +594,14 @@
       var pre = assignDefaults(r);
       html += '<td><span class="badge ' + st.cls + '">' + st.label + '</span></td>'
         + '<td><div class="d-flex flex-wrap gap-1"><select class="form-select form-select-sm" data-role="assign-project">' + projectOptions(r.amount, pre.cat, pre.projectId) + '</select>'
-        + '<select class="form-select form-select-sm" data-role="assign-cat" style="min-width:7rem">' + catOptions(pre.cat) + '</select></div></td>'
+        + '<select class="form-select form-select-sm" data-role="assign-cat" style="min-width:7rem">' + catOptions(pre.cat) + '</select></div>' + cardUsersHint(pre.projectId) + '</td>'
         + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-primary" data-action="assign">처리</button> '
         + '<button type="button" class="btn btn-sm btn-outline-danger" data-action="reject">반려</button> '
         + '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="edit-request" title="수정"><i class="ti ti-edit"></i></button></td>';
     } else {
       html += '<td><span class="badge ' + st.cls + '">' + st.label + '</span>'
-        + (r.processedAt ? '<div class="small text-secondary text-nowrap">' + fmtDate(r.processedAt) + (r.processedBy ? ' · ' + esc(r.processedBy) : '') + '</div>' : '') + '</td>'
+        + (r.processedAt ? '<div class="small text-secondary text-nowrap">' + fmtDate(r.processedAt) + (r.processedBy ? ' · ' + esc(r.processedBy) : '') + '</div>' : '')
+        + (r.status === 'done' ? '<div class="mt-1">' + reportBadge(r) + '</div>' : '') + '</td>'
         + '<td>' + (p ? '<div>' + esc(p.name) + '</div><div class="small text-secondary">' + esc(p.code) + '</div>' : '<span class="text-secondary">-</span>') + '</td>'
         + '<td class="text-end text-nowrap">'
         + (admin && r.status !== 'pending' ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="reopen" title="미처리로 되돌리기"><i class="ti ti-arrow-back-up"></i></button>' : '')
@@ -844,7 +859,7 @@
           + '<td class="text-nowrap"><div>' + fmtDate(r.createdAt) + '</div><div class="small text-secondary">' + esc(r.requesterName) + '</div></td>'
           + '<td>' + itemCell(r) + '</td>'
           + amountCell(r)
-          + '<td><select class="form-select form-select-sm" data-role="assign-project">' + projectOptions(r.amount, pre.cat, pre.projectId) + '</select></td>'
+          + '<td><select class="form-select form-select-sm" data-role="assign-project">' + projectOptions(r.amount, pre.cat, pre.projectId) + '</select>' + cardUsersHint(pre.projectId) + '</td>'
           + '<td><select class="form-select form-select-sm" data-role="assign-cat">' + catOptions(pre.cat) + '</select></td>'
           + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-primary" data-action="assign">처리</button> '
           + '<button type="button" class="btn btn-sm btn-outline-danger" data-action="reject">반려</button> '
@@ -878,8 +893,10 @@
       + (editing ? '<div class="card-actions"><button type="button" class="btn btn-sm btn-ghost-secondary" data-action="cancel-edit">취소</button></div>' : '') + '</div>'
       + '<div class="card-body"><form id="project-form" data-id="' + esc(editing ? editing.id : '') + '"><div class="row g-3">'
       + '<div class="col-12"><label class="form-label required">과제명</label><input type="text" class="form-control" name="name" required value="' + esc(editing ? editing.name : '') + '" placeholder="과제명"></div>'
-      + '<div class="col-6"><label class="form-label">과제번호</label><input type="text" class="form-control" name="code" value="' + esc(editing ? editing.code : '') + '" placeholder="2026-A01"></div>'
+      + '<div class="col-6"><label class="form-label">과제번호 <span class="form-label-description">보고서 계정란</span></label><input type="text" class="form-control" name="code" value="' + esc(editing ? editing.code : '') + '" placeholder="G04260010(00)"></div>'
       + '<div class="col-6"><label class="form-label">연구책임자</label><input type="text" class="form-control" name="manager" value="' + esc(editing ? editing.manager : '') + '" placeholder="김교수"></div>'
+      + '<div class="col-6"><label class="form-label">계정책임자 <span class="form-label-description">보고서 기본값</span></label><input type="text" class="form-control" name="accountManager" value="' + esc(editing ? (editing.accountManager || '') : (CFG.report && CFG.report.defaultAccountManager || '')) + '" placeholder="권지민"></div>'
+      + '<div class="col-6"><label class="form-label">카드 실사용자 목록 <span class="form-label-description">참여연구원, 쉼표 구분</span></label><input type="text" class="form-control" name="cardUsers" value="' + esc(editing && editing.cardUsers ? editing.cardUsers.join(', ') : '') + '" placeholder="박민호, 위동진"></div>'
       + '<div class="col-6"><label class="form-label">시작일</label><input type="date" class="form-control" name="startDate" value="' + esc(editing ? editing.startDate : '') + '"></div>'
       + '<div class="col-6"><label class="form-label">종료일</label><input type="date" class="form-control" name="endDate" value="' + esc(editing ? editing.endDate : '') + '"></div>'
       + '<div class="col-12"><div class="form-label">비목별 예산 (원)</div><div class="row g-2">' + budgetInputs + '</div>'
@@ -1304,7 +1321,8 @@
       if (!p.name.trim()) { toast('과제명을 입력하세요.', true); return; }
       var budgets = {};
       CAT_IDS.forEach(function (c) { budgets[c] = Math.max(0, Math.round(Number(p['budget_' + c]) || 0)); });
-      var rec = { code: p.code.trim(), name: p.name.trim(), budgets: budgets, startDate: p.startDate, endDate: p.endDate, manager: p.manager.trim(), note: p.note.trim(), active: !!p.active };
+      var rec = { code: p.code.trim(), name: p.name.trim(), budgets: budgets, startDate: p.startDate, endDate: p.endDate, manager: p.manager.trim(), note: p.note.trim(), active: !!p.active,
+        accountManager: (p.accountManager || '').trim(), cardUsers: String(p.cardUsers || '').split(/[,\n、]/).map(function (s) { return s.trim(); }).filter(Boolean) };
       if (id) rec.id = id;
       store.saveProject(rec).then(function () { toast(id ? '과제를 수정했습니다.' : '과제를 추가했습니다.'); state.editingProjectId = null; touchUnlock(); return refresh(); }).catch(handleError);
     }
@@ -1353,6 +1371,12 @@
       var sel = row && row.querySelector('select[data-role="assign-project"]');
       var req = row && requestById(row.getAttribute('data-id'));
       if (sel && req) sel.innerHTML = projectOptions(req.amount, normCat(el.value), sel.value);
+    }
+    if (role === 'assign-project') {
+      /* 과제를 고르면 그 과제의 카드 실사용자 목록을 바로 보여줌 */
+      var cell = el.closest('td') || el.parentElement;
+      var hint = cell && cell.querySelector('[data-role="card-users"]');
+      if (hint) hint.outerHTML = cardUsersHint(el.value);
     }
     var mf = el.closest('#modal-form');
     if (mf && el.name === 'category' && mf.elements.projectId) {
