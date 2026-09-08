@@ -228,9 +228,9 @@
         { id: uid(), createdAt: daysAgo(3), itemId: 'inv-5', itemName: '텅스텐 프로브 팁 (10개입)', location: '측정실 서랍 2', type: 'out', qty: 2, unitPrice: 95000, userName: '홍길동', note: '', stockAfter: 4 }
       ],
       projects: [
-        { id: p1, code: '2026-A01', name: '차세대 AI 반도체 모놀리식 3D 집적 기술', budgets: { material: 25000000, activity: 10000000, equipment: 15000000, other: 0 }, startDate: '2026-03-01', endDate: '2027-02-28', manager: '김교수', note: '재료비 위주 집행', active: true, createdAt: daysAgo(120) },
-        { id: p2, code: '2026-B07', name: '산화물 반도체 기반 DRAM 셀 소자 개발', budgets: { material: 18000000, activity: 7000000, equipment: 5000000, other: 0 }, startDate: '2026-01-01', endDate: '2026-12-31', manager: '김교수', note: '', active: true, createdAt: daysAgo(200) },
-        { id: p3, code: '2025-C03', name: '이종 집적 첨단 패키징 기초연구', budgets: { material: 8000000, activity: 4000000, equipment: 8000000, other: 0 }, startDate: '2025-09-01', endDate: '2026-08-31', manager: '김교수', note: '종료 임박, 잔액 소진 우선', active: true, createdAt: daysAgo(370) }
+        { id: p1, code: '2026-A01', name: '차세대 AI 반도체 모놀리식 3D 집적 기술', budgets: { material: 25000000, activity: 10000000, equipment: 15000000, meeting: 3000000, other: 0 }, startDate: '2026-03-01', endDate: '2027-02-28', manager: '김교수', note: '재료비 위주 집행', active: true, createdAt: daysAgo(120) },
+        { id: p2, code: '2026-B07', name: '산화물 반도체 기반 DRAM 셀 소자 개발', budgets: { material: 18000000, activity: 7000000, equipment: 5000000, meeting: 2000000, other: 0 }, startDate: '2026-01-01', endDate: '2026-12-31', manager: '김교수', note: '', active: true, createdAt: daysAgo(200) },
+        { id: p3, code: '2025-C03', name: '이종 집적 첨단 패키징 기초연구', budgets: { material: 8000000, activity: 4000000, equipment: 8000000, meeting: 1000000, other: 0 }, startDate: '2025-09-01', endDate: '2026-08-31', manager: '김교수', note: '종료 임박, 잔액 소진 우선', active: true, createdAt: daysAgo(370) }
       ],
       requests: [
         { id: uid(), createdAt: daysAgo(1), requesterId: 'demo-1', requesterName: '홍길동', item: '6인치 SiO2/Si 웨이퍼 25매', category: 'material', link: 'https://example.com/wafer', qty: 1, unitPrice: 1850000, amount: 1850000, note: 'TMD 성장용 기판', status: 'pending', projectId: null, reviewId: null, adminNote: '', processedAt: null, processedBy: null },

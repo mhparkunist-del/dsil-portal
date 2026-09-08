@@ -551,10 +551,13 @@
 
   function itemCell(r) {
     var rv = r.reviewId ? reviewById(r.reviewId) : null;
+    var meetingSub = r.kind === 'meeting' && r.meta ? [r.meta.place, r.meta.attendeeCount ? r.meta.attendeeCount + '명' : '', r.meta.heldAt ? fmtDate(r.meta.heldAt) + ' 회의' : ''].filter(Boolean).join(' · ') : '';
+    var sug = r.meta && r.meta.suggestedProjectId && projectById(r.meta.suggestedProjectId) ? projectById(r.meta.suggestedProjectId) : null;
     return '<div class="fw-medium">' + (r.kind === 'meeting' ? '<span class="badge bg-green-lt me-1">회의비</span>' : '') + esc(r.item)
       + (r.link ? ' <a href="' + esc(r.link) + '" target="_blank" rel="noopener" class="text-secondary" title="링크 열기"><i class="ti ti-external-link"></i></a>' : '') + '</div>'
       + '<div class="small text-secondary"><span class="badge badge-outline text-primary me-1">' + esc(catLabel(normCat(r.category))) + '</span>'
-      + (r.reviewId ? '<span class="badge bg-green-lt me-1" title="' + esc(rv ? rv.title : '') + '"><i class="ti ti-shield-check"></i> 심의</span>' : '') + esc(r.note || '') + '</div>'
+      + (r.reviewId ? '<span class="badge bg-green-lt me-1" title="' + esc(rv ? rv.title : '') + '"><i class="ti ti-shield-check"></i> 심의</span>' : '') + esc(meetingSub || r.note || '')
+      + (sug && r.status === 'pending' ? '<span class="ms-1">· 청구 과제 ' + esc(sug.code || sug.name) + '</span>' : '') + '</div>'
       + (r.status === 'rejected' && r.adminNote ? '<div class="small text-danger">반려 사유: ' + esc(r.adminNote) + '</div>' : '');
   }
 
@@ -598,7 +601,8 @@
   function assignDefaults(r) {
     var rv = r.reviewId && state.reviewsFull ? reviewById(r.reviewId) : null;
     if (rv && rv.status === 'approved' && rv.projectId) return { projectId: rv.projectId, cat: normCat(rv.category) };
-    return { projectId: '', cat: normCat(r.category) };
+    var sug = r.meta && r.meta.suggestedProjectId && projectById(r.meta.suggestedProjectId) ? r.meta.suggestedProjectId : '';
+    return { projectId: sug, cat: normCat(r.category) };
   }
 
   function projectOptions(amount, cat, selectedId) {

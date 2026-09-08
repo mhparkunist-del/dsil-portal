@@ -23,6 +23,7 @@ window.DSIL_CONFIG = {
     { id: 'material',  label: '재료비' },
     { id: 'activity',  label: '연구활동비' },
     { id: 'equipment', label: '장비구매비' },
+    { id: 'meeting',   label: '회의비' },
     { id: 'other',     label: '기타' }
   ],
 

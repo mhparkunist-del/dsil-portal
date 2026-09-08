@@ -10,7 +10,7 @@
   var CFG = window.DSIL_CONFIG || {};
   var CATS = (CFG.budgetCategories && CFG.budgetCategories.length) ? CFG.budgetCategories : [{ id: 'other', label: '기타' }];
   var CAT_IDS = CATS.map(function (c) { return c.id; });
-  var DEFAULT_CAT = CAT_IDS.indexOf('activity') >= 0 ? 'activity' : CAT_IDS[0];
+  var DEFAULT_CAT = CAT_IDS.indexOf('meeting') >= 0 ? 'meeting' : (CAT_IDS.indexOf('activity') >= 0 ? 'activity' : CAT_IDS[0]);
   var U = window.DSILUI;
   var esc = U.esc, won = U.won, nf = U.nf, pad2 = U.pad2, localDate = U.localDate, fmtDate = U.fmtDate, fmtDateTime = U.fmtDateTime, fmtTime = U.fmtTime;
   var $ = U.$, toast = U.toast, readForm = U.readForm, dialog = U.dialog, confirmDlg = U.confirmDlg, promptDlg = U.promptDlg, empty = U.empty, dg = U.dg, stat = U.stat, csvCell = U.csvCell, download = U.download;
@@ -18,7 +18,8 @@
   var ADMIN_KEY = 'dsil-budget-admin-unlock';
   var TABS = ['claim', 'list', 'admin'];
   var STATUS = { pending: { label: '미처리', cls: 'bg-yellow-lt' }, done: { label: '처리', cls: 'bg-blue-lt' }, rejected: { label: '반려', cls: 'bg-red-lt' } };
-  var PAY = { card: '법인카드', personal: '개인 선결제', invoice: '세금계산서' };
+  var PAY = { woori: '우리카드', shinhan: '신한카드', personal: '개인 선결제', invoice: '세금계산서', card: '법인카드' };
+  var PAY_CHOICES = ['woori', 'shinhan', 'personal', 'invoice'];   /* 청구 폼에 보이는 순서 (card 는 이전 기록 표시용) */
 
   var state = { ready: false, error: null, session: null, projects: [], requests: [], reviews: [], reviewsFull: false, tab: 'claim', filter: 'all', adminUnlocked: false };
 
@@ -141,8 +142,10 @@
       + '<div class="col-sm-6"><label class="form-label required">장소 (식당·업체)</label><input type="text" class="form-control" name="place" required placeholder="예: 카이마루 2층"></div>'
       + '<div class="col-12"><label class="form-label required">참석자 <span class="form-label-description">쉼표로 구분</span></label><textarea class="form-control" name="attendees" rows="2" required placeholder="홍길동, 이영희, 박철수"></textarea><div class="form-hint" id="attendee-hint">0명</div></div>'
       + '<div class="col-sm-4"><label class="form-label required">금액 (원)</label><input type="number" class="form-control tnum" name="amount" min="0" step="1" required placeholder="0"></div>'
-      + '<div class="col-sm-4"><label class="form-label required">결제 방법</label><select class="form-select" name="payment">' + Object.keys(PAY).map(function (k) { return '<option value="' + k + '">' + PAY[k] + '</option>'; }).join('') + '</select></div>'
+      + '<div class="col-sm-4"><label class="form-label required">결제 방법</label><select class="form-select" name="payment">' + PAY_CHOICES.map(function (k) { return '<option value="' + k + '">' + PAY[k] + '</option>'; }).join('') + '</select></div>'
       + '<div class="col-sm-4"><label class="form-label">비목</label><select class="form-select" name="category">' + catOptions(DEFAULT_CAT) + '</select></div>'
+      + '<div class="col-12"><label class="form-label">청구 과제 <span class="form-label-description">관련 과제를 알면 선택 · 최종 배정은 관리자</span></label><select class="form-select" name="suggestedProjectId"><option value="">모름 / 관리자 배정</option>'
+      + state.projects.filter(function (p) { return p.active !== false; }).map(function (p) { return '<option value="' + esc(p.id) + '">' + esc((p.code ? p.code + ' ' : '') + p.name) + '</option>'; }).join('') + '</select></div>'
       + '<div class="col-12"><label class="form-label required">회의 목적 · 안건</label><textarea class="form-control" name="purpose" rows="2" required placeholder="논의 내용 요약"></textarea></div>'
       + '<div class="col-12"><label class="form-label">비고 <span class="form-label-description">영수증 번호, 특이사항</span></label><input type="text" class="form-control" name="note"></div>'
       + '</div><div class="d-flex justify-content-between align-items-center mt-3"><span class="small text-secondary" id="per-head"></span><button type="submit" class="btn btn-primary"><i class="ti ti-send me-1"></i>청구 제출</button></div></form>'
@@ -171,12 +174,13 @@
       + '<td class="text-end tnum text-nowrap fw-medium">' + won(r.amount) + '</td>';
     if (admin && r.status === 'pending') {
       var cat = normCat(r.category);
-      html += '<td><span class="badge ' + st.cls + '">' + st.label + '</span></td>'
-        + '<td><div class="d-flex flex-wrap gap-1"><select class="form-select form-select-sm" data-role="assign-project">' + projectOptions(r.amount, cat, '') + '</select><select class="form-select form-select-sm" data-role="assign-cat" style="min-width:7rem">' + catOptions(cat) + '</select></div></td>'
+      var suggested = m.suggestedProjectId && projectById(m.suggestedProjectId) ? m.suggestedProjectId : '';
+      html += '<td><span class="badge ' + st.cls + '">' + st.label + '</span>' + (suggested ? '<div class="small text-secondary">청구자 지정 과제</div>' : '') + '</td>'
+        + '<td><div class="d-flex flex-wrap gap-1"><select class="form-select form-select-sm" data-role="assign-project">' + projectOptions(r.amount, cat, suggested) + '</select><select class="form-select form-select-sm" data-role="assign-cat" style="min-width:7rem">' + catOptions(cat) + '</select></div></td>'
         + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="detail" title="상세"><i class="ti ti-eye"></i></button> <button type="button" class="btn btn-sm btn-primary" data-action="assign">처리</button> <button type="button" class="btn btn-sm btn-outline-danger" data-action="reject">반려</button></td>';
     } else {
       html += '<td><span class="badge ' + st.cls + '">' + st.label + '</span>' + (r.processedAt ? '<div class="small text-secondary text-nowrap">' + fmtDate(r.processedAt) + (r.processedBy ? ' · ' + esc(r.processedBy) : '') + '</div>' : '') + '</td>'
-        + '<td>' + (p ? '<div>' + esc(p.name) + '</div><div class="small text-secondary">' + esc(p.code) + ' · ' + esc(catLabel(normCat(r.category))) + '</div>' : '<span class="text-secondary">-</span>') + '</td>'
+        + '<td>' + (p ? '<div>' + esc(p.name) + '</div><div class="small text-secondary">' + esc(p.code) + ' · ' + esc(catLabel(normCat(r.category))) + '</div>' : (m.suggestedProjectId && projectById(m.suggestedProjectId) ? '<span class="text-secondary small">청구 과제: ' + esc(projectById(m.suggestedProjectId).name) + '</span>' : '<span class="text-secondary">-</span>')) + '</td>'
         + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="detail" title="상세"><i class="ti ti-eye"></i></button>'
         + (admin && r.status !== 'pending' ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="reopen" title="미처리로 되돌리기"><i class="ti ti-arrow-back-up"></i></button>' : '')
         + ((admin || (own && r.status === 'pending')) ? '<button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="delete" title="' + (own && !admin ? '청구 취소' : '삭제') + '"><i class="ti ti-trash"></i></button>' : '') + '</td>';
@@ -214,7 +218,8 @@
     var html = '<div class="datagrid mb-3">' + dg('회의명', esc(m.title || r.item)) + dg('회의 일시', esc(fmtDateTime(m.heldAt || r.createdAt))) + dg('장소', esc(m.place || '-')) + dg('청구자', esc(r.requesterName) + ' <span class="text-secondary small">· ' + fmtDate(r.createdAt) + '</span>')
       + dg('금액', '<span class="tnum">' + won(r.amount) + '</span>' + (m.attendees ? ' <span class="text-secondary small">(' + attendeeCount(m.attendees) + '명 · 1인 ' + won(r.amount / Math.max(1, attendeeCount(m.attendees))) + ')</span>' : '')) + dg('결제', esc(PAY[m.payment] || m.payment || '-'))
       + dg('상태', '<span class="badge ' + st.cls + '">' + st.label + '</span>' + (r.processedAt ? ' <span class="text-secondary small">' + fmtDate(r.processedAt) + (r.processedBy ? ' · ' + esc(r.processedBy) : '') + '</span>' : ''))
-      + (p ? dg('배정 과제', esc(p.name) + ' <span class="text-secondary small">' + esc(p.code) + ' · ' + esc(catLabel(normCat(r.category))) + '</span>') : '') + '</div>'
+      + (p ? dg('배정 과제', esc(p.name) + ' <span class="text-secondary small">' + esc(p.code) + ' · ' + esc(catLabel(normCat(r.category))) + '</span>') : '')
+      + (m.suggestedProjectId && projectById(m.suggestedProjectId) ? dg('청구 과제 (청구자 지정)', esc(projectById(m.suggestedProjectId).name)) : '') + '</div>'
       + '<div class="mb-3"><div class="subheader">참석자</div><div>' + esc(m.attendees || '-') + '</div></div>'
       + '<div class="mb-3"><div class="subheader">회의 목적 · 안건</div><div style="white-space:pre-wrap">' + esc(m.purpose || '-') + '</div></div>'
       + (r.note ? '<div class="mb-3"><div class="subheader">비고</div><div>' + esc(r.note) + '</div></div>' : '')
@@ -255,7 +260,7 @@
     var heldAt = new Date(v.heldAt); if (isNaN(heldAt)) { toast('회의 일시를 입력하세요.', true); return; }
     store.createRequest({
       kind: 'meeting', item: '회의비 · ' + v.title.trim(), category: normCat(v.category), link: '', qty: 1, unitPrice: amount, amount: amount,
-      note: v.note.trim(), meta: { title: v.title.trim(), heldAt: heldAt.toISOString(), place: v.place.trim(), attendees: v.attendees.trim(), attendeeCount: n, payment: v.payment, purpose: v.purpose.trim() }
+      note: v.note.trim(), meta: { title: v.title.trim(), heldAt: heldAt.toISOString(), place: v.place.trim(), attendees: v.attendees.trim(), attendeeCount: n, payment: v.payment, purpose: v.purpose.trim(), suggestedProjectId: v.suggestedProjectId || '' }
     }).then(function () { toast('회의비 청구를 제출했습니다. 관리자 처리 후 상태가 바뀝니다.'); state.tab = 'list'; return refresh(); }).catch(handleError);
   });
 
