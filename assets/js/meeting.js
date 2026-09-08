@@ -1,16 +1,20 @@
 /* =====================================================================
    DSIL Lab Portal – 회의비 처리 (UI)
    구매 요청과 달리 관리자 승인 단계가 없습니다.
-   청구자가 사용 카드와 과제(참여과제 시트에 있는 과제)를 고르고 참석자를 그 과제의 참여자 중에서 배정하면
+   청구자가 사용 카드와 과제(참여과제 시트에 있는 과제)를 고르고 참석자를 배정해 제출하면
    즉시 처리(status done, 과제 예산의 회의비에서 차감)되고 회의록(보고서) 작성 화면으로 넘어갑니다.
-   규칙: 1인당 회의비 ≤ config.meeting.perPersonMax (기본 30,000원). 자동 추가 버튼이 금액에 맞춰 인원을 채웁니다.
-   탭: 회의비 청구 · 청구 내역 · 관리자(PIN: 참여과제 시트 가져오기, 이전 방식의 미처리 건 처리)
+   규칙
+     · 1인당 회의비 ≤ config.meeting.perPersonMax (기본 30,000원). 자동 추가 버튼이 금액에 맞춰 인원을 채움
+     · 참석자는 그 과제의 참여자(시트, 회의 월 기준)만. 단 config.meeting.projectRules 에 있는 과제(예: 우수신진)는
+       시트에 있지만 그 과제에 참여하지 않는 연구원(미참여 연구원)을 최소 n명 꼭 포함
+     · 모든 처리(청구·회의록·삭제·시트 가져오기·동기화·과제번호)는 처리 로그에 남음
+   탭: 회의비 청구 · 청구 내역 · 처리 로그 · 관리자(PIN: 시트 가져오기, 과제 동기화, 이전 방식 미처리 건)
    ===================================================================== */
 (function () {
   'use strict';
 
   var CFG = window.DSIL_CONFIG || {};
-  var MCFG = Object.assign({ perPersonMax: 30000, autoProcessedBy: '자동 배정 (참여과제)' }, CFG.meeting || {});
+  var MCFG = Object.assign({ perPersonMax: 30000, autoProcessedBy: '자동 배정 (참여과제)', projectRules: {} }, CFG.meeting || {});
   var CATS = (CFG.budgetCategories && CFG.budgetCategories.length) ? CFG.budgetCategories : [{ id: 'other', label: '기타' }];
   var CAT_IDS = CATS.map(function (c) { return c.id; });
   var DEFAULT_CAT = CAT_IDS.indexOf('meeting') >= 0 ? 'meeting' : (CAT_IDS.indexOf('activity') >= 0 ? 'activity' : CAT_IDS[0]);
@@ -19,13 +23,14 @@
   var $ = U.$, toast = U.toast, readForm = U.readForm, dialog = U.dialog, confirmDlg = U.confirmDlg, promptDlg = U.promptDlg, empty = U.empty, dg = U.dg, stat = U.stat, csvCell = U.csvCell, download = U.download;
   var store = window.DSILStore.create(CFG);
   var ADMIN_KEY = 'dsil-budget-admin-unlock';
-  var TABS = ['claim', 'list', 'admin'];
+  var TABS = ['claim', 'list', 'log', 'admin'];
   var STATUS = { pending: { label: '미처리', cls: 'bg-yellow-lt' }, done: { label: '처리', cls: 'bg-blue-lt' }, rejected: { label: '반려', cls: 'bg-red-lt' } };
   var RSTATUS = { none: { label: '회의록 미작성', cls: 'bg-yellow-lt' }, draft: { label: '회의록 작성 중', cls: 'bg-secondary-lt' }, submitted: { label: '회의록 제출', cls: 'bg-blue-lt' }, verified: { label: '회의록 확인', cls: 'bg-green-lt' } };
   var PAY = { woori: '우리카드', shinhan: '신한카드', personal: '개인 선결제', invoice: '세금계산서', card: '법인카드', naverpay: '네이버페이' };
   var PAY_CHOICES = ['woori', 'shinhan', 'personal', 'invoice'];
+  var LOG_TYPES = { claim: { label: '청구·처리', cls: 'bg-blue-lt' }, minutes: { label: '회의록 제출', cls: 'bg-indigo-lt' }, 'minutes-verify': { label: '회의록 확인', cls: 'bg-green-lt' }, 'minutes-return': { label: '회의록 보완 요청', cls: 'bg-orange-lt' }, delete: { label: '삭제·취소', cls: 'bg-red-lt' }, assign: { label: '관리자 배정', cls: 'bg-blue-lt' }, reject: { label: '반려', cls: 'bg-red-lt' }, reopen: { label: '되돌림', cls: 'bg-yellow-lt' }, import: { label: '시트 가져오기', cls: 'bg-purple-lt' }, sync: { label: '과제 동기화', cls: 'bg-purple-lt' }, link: { label: '약칭 연결', cls: 'bg-purple-lt' }, code: { label: '과제번호', cls: 'bg-secondary-lt' } };
 
-  var state = { ready: false, error: null, session: null, projects: [], requests: [], reviews: [], reviewsFull: false, tab: 'claim', filter: 'all', adminUnlocked: false, importInfo: null,
+  var state = { ready: false, error: null, session: null, projects: [], requests: [], reviews: [], reviewsFull: false, rows: [], logs: [], tab: 'claim', filter: 'all', logFilter: 'all', adminUnlocked: false, importInfo: null,
     claim: { projectId: '', heldAt: '', amount: 0, attendees: [], others: '' } };
 
   /* ---------- helpers ---------- */
@@ -41,6 +46,8 @@
   function attendeeCount(text) { return splitNames(text).length; }
   function monthKey(d) { var x = new Date(d); return isNaN(x) ? '' : x.getFullYear() + '-' + pad2(x.getMonth() + 1); }
   function projectLabel(p) { return (p.alias && p.alias !== p.name ? p.alias + ' · ' : '') + p.name + (p.code ? ' (' + p.code + ')' : ''); }
+  function ruleOf(p) { if (!p) return null; var keys = Object.keys(MCFG.projectRules || {}); for (var i = 0; i < keys.length; i++) if (nameKey(keys[i]) === nameKey(p.alias || p.name)) return MCFG.projectRules[keys[i]]; return null; }
+  function minOutsiders(p) { var r = ruleOf(p); return r && Number(r.minNonParticipants) > 0 ? Number(r.minNonParticipants) : 0; }
 
   /* 시트 기준 참여 여부: 해당 월 칸이 있으면 그 값, 없으면 시트 어딘가에 참여 표시가 있으면 참여 */
   function participates(part, mk) {
@@ -51,6 +58,15 @@
   }
   function eligibleNames(p, mk) { return (p && Array.isArray(p.participants) ? p.participants : []).filter(function (x) { return participates(x, mk); }).map(function (x) { return x.name; }); }
   function hasSheet(p) { return !!(p && Array.isArray(p.participants) && p.participants.length); }
+  /* 연구실 연구원 명단 = 시트에 있는 모든 사람 (시트 순서) */
+  function roster() {
+    var out = [];
+    if (state.rows.length) state.rows.forEach(function (r) { if (out.indexOf(r.name) < 0) out.push(r.name); });
+    else state.projects.forEach(function (p) { (p.participants || []).forEach(function (x) { if (out.indexOf(x.name) < 0) out.push(x.name); }); });
+    return out;
+  }
+  function outsiderNames(p, mk) { var inP = eligibleNames(p, mk).map(nameKey); return roster().filter(function (n) { return inP.indexOf(nameKey(n)) < 0; }); }
+  function isParticipant(p, mk, name) { return eligibleNames(p, mk).some(function (n) { return nameKey(n) === nameKey(name); }); }
   function myProjects(mk) {
     var me = nameKey(state.session.user.name);
     return state.projects.filter(function (p) { return p.active !== false && eligibleNames(p, mk).some(function (n) { return nameKey(n) === me; }); });
@@ -58,6 +74,7 @@
   function minPeople(amount) { return Math.max(1, Math.ceil((Number(amount) || 0) / MCFG.perPersonMax)); }
   function claimTotal() { return state.claim.attendees.length + attendeeCount(state.claim.others); }
   function perHead() { var n = claimTotal(); return n ? (Number(state.claim.amount) || 0) / n : 0; }
+  function claimOutsiders() { var p = state.claim.projectId ? projectById(state.claim.projectId) : null; var mk = monthKey(state.claim.heldAt); return p ? state.claim.attendees.filter(function (n) { return !isParticipant(p, mk, n); }) : []; }
 
   function reportBadge(r) {
     if (r.status !== 'done') return '';
@@ -65,6 +82,11 @@
     var S = RSTATUS[st] || RSTATUS.none;
     return '<a href="../report/index.html#id=' + esc(r.id) + '" class="badge ' + S.cls + ' text-decoration-none" title="회의록 열기"><i class="ti ti-file-text me-1"></i>' + S.label + '</a>';
   }
+  function logFor(r, type, detail) {
+    var m = r.meta || {}; var p = r.projectId ? projectById(r.projectId) : null; var n = m.attendeeCount || attendeeCount(m.attendees);
+    return store.addMeetingLog({ type: type, requestId: r.id, requesterId: r.requesterId, requesterName: r.requesterName, project: p ? (p.alias || p.name) : '', code: p ? (p.code || '') : '', title: m.title || r.item, amount: r.amount, count: n, perHead: n ? Math.round(r.amount / n) : 0, attendees: m.attendees || '', detail: detail || '' }).catch(function (e) { console.error(e); });
+  }
+  function logPlain(type, detail) { return store.addMeetingLog({ type: type, detail: detail || '' }).catch(function (e) { console.error(e); }); }
 
   /* 과제·비목별 잔액 = 예산 − 실집행 − 가할당 (구매 요청 페이지와 같은 규칙) */
   function remainOf(p, cat) {
@@ -110,11 +132,12 @@
     state.session = store.getSession();
     state.adminUnlocked = readUnlock();
     var full = isAdminActive();
-    return Promise.all([store.listProjects(), store.listRequests(), state.session ? store.listReviews({ full: full }) : Promise.resolve([]), store.getParticipationInfo ? store.getParticipationInfo().catch(function () { return null; }) : Promise.resolve(null)]).then(function (res) {
+    var safe = function (pr, dflt) { return pr.catch(function () { return dflt; }); };
+    return Promise.all([store.listProjects(), store.listRequests(), state.session ? store.listReviews({ full: full }) : Promise.resolve([]), safe(store.getParticipationInfo(), null), safe(store.getParticipationRows(), []), safe(store.listMeetingLogs(), [])]).then(function (res) {
       state.projects = res[0];
       state.requests = res[1].slice().sort(function (a, b) { return String(b.createdAt).localeCompare(String(a.createdAt)); });
       state.reviews = res[2]; state.reviewsFull = full;
-      state.importInfo = res[3];
+      state.importInfo = res[3]; state.rows = res[4] || []; state.logs = res[5] || [];
       if (state.tab === 'admin' && !isAdminActive()) state.tab = 'claim';
     });
   }
@@ -143,9 +166,9 @@
         ? stat('이번 달 처리', monthDone.length + '건', won(monthDone.reduce(function (s, r) { return s + r.amount; }, 0)) + (pending.length ? ' · 미처리 ' + pending.length + '건' : ''), '')
         : stat('1인당 한도', won(MCFG.perPersonMax), '금액 ÷ 인원이 넘지 않게', ''))
       + '</div>';
-    var tab = state.tab === 'list' ? renderListTab() : state.tab === 'admin' ? renderAdminTab() : renderClaimTab();
+    var tab = state.tab === 'list' ? renderListTab() : state.tab === 'log' ? renderLogTab() : state.tab === 'admin' ? renderAdminTab() : renderClaimTab();
     html += '<div class="card mb-3"><div class="card-header"><ul class="nav nav-tabs card-header-tabs" role="tablist">'
-      + tabLink('claim', 'receipt', '회의비 청구') + tabLink('list', 'list-details', '청구 내역')
+      + tabLink('claim', 'receipt', '회의비 청구') + tabLink('list', 'list-details', '청구 내역') + tabLink('log', 'history', '처리 로그')
       + (isAdminEligible() ? tabLink('admin', state.adminUnlocked ? 'lock-open' : 'lock', '관리자', pending.length && state.adminUnlocked ? '<span class="badge bg-yellow-lt ms-2">' + pending.length + '</span>' : '') : '')
       + '</ul></div>' + tab.body + '</div>' + (tab.after || '');
     app.innerHTML = html;
@@ -170,28 +193,35 @@
   function claimProjectOptions() {
     var mk = monthKey(state.claim.heldAt);
     var mineP = myProjects(mk);
-    var sheetP = state.projects.filter(function (p) { return p.active !== false && hasSheet(p); });
-    var list = mineP.length ? mineP : sheetP;
-    if (!list.length) return '<option value="">참여과제 시트가 없습니다 (관리자 탭에서 가져오기)</option>';
-    return '<option value="">과제 선택…</option>' + list.map(function (p) { return '<option value="' + esc(p.id) + '"' + (p.id === state.claim.projectId ? ' selected' : '') + '>' + esc(projectLabel(p)) + ' · 참여자 ' + eligibleNames(p, mk).length + '명</option>'; }).join('');
+    var sheetP = state.projects.filter(function (p) { return p.active !== false && hasSheet(p) && mineP.indexOf(p) < 0; });
+    if (!mineP.length && !sheetP.length) return '<option value="">참여과제 시트가 없습니다 (관리자 탭에서 가져오기)</option>';
+    var optOf = function (p) { var mo = minOutsiders(p); return '<option value="' + esc(p.id) + '"' + (p.id === state.claim.projectId ? ' selected' : '') + '>' + esc(projectLabel(p)) + ' · 참여자 ' + eligibleNames(p, mk).length + '명' + (mo ? ' · 미참여 ' + mo + '명 필수' : '') + '</option>'; };
+    return '<option value="">과제 선택…</option>' + (mineP.length ? '<optgroup label="내가 참여한 과제">' + mineP.map(optOf).join('') + '</optgroup>' : '') + (sheetP.length ? '<optgroup label="그 외 과제">' + sheetP.map(optOf).join('') + '</optgroup>' : '');
   }
 
   function attendeeBlockHtml() {
     var c = state.claim, p = c.projectId ? projectById(c.projectId) : null;
     var mk = monthKey(c.heldAt);
     var names = p ? eligibleNames(p, mk) : [];
-    var left = names.filter(function (n) { return c.attendees.indexOf(n) < 0; });
+    var minOut = p ? minOutsiders(p) : 0;
+    var outs = p && minOut ? outsiderNames(p, mk) : [];
+    var leftIn = names.filter(function (n) { return c.attendees.indexOf(n) < 0; });
+    var leftOut = outs.filter(function (n) { return c.attendees.indexOf(n) < 0; });
     var total = claimTotal(), need = minPeople(c.amount), ph = perHead(), over = total && ph > MCFG.perPersonMax;
+    var curOut = claimOutsiders().length;
     var html = '<div class="d-flex flex-wrap gap-1 mb-2" id="attendee-chips">'
-      + c.attendees.map(function (n) { return '<span class="badge bg-blue-lt rp-chip">' + esc(n) + '<button type="button" class="btn-close btn-close-sm ms-1" data-action="remove-attendee" data-name="' + esc(n) + '" aria-label="빼기" style="font-size:.6rem"></button></span>'; }).join('')
+      + c.attendees.map(function (n) { var inP = p ? isParticipant(p, mk, n) : true; return '<span class="badge ' + (inP ? 'bg-blue-lt' : 'bg-orange-lt') + ' rp-chip" title="' + (inP ? '과제 참여자' : '미참여 연구원') + '">' + esc(n) + (inP ? '' : ' <span class="small opacity-75">미참여</span>') + '<button type="button" class="btn-close btn-close-sm ms-1" data-action="remove-attendee" data-name="' + esc(n) + '" aria-label="빼기" style="font-size:.6rem"></button></span>'; }).join('')
       + splitNames(c.others).map(function (n) { return '<span class="badge bg-secondary-lt rp-chip" title="시트에 없는 참석자">' + esc(n) + '</span>'; }).join('')
       + (!total ? '<span class="text-secondary small">아직 없음</span>' : '') + '</div>'
       + '<div class="d-flex flex-wrap gap-2 align-items-center">'
-      + '<select class="form-select form-select-sm w-auto" id="attendee-select"' + (!p ? ' disabled' : '') + '><option value="">' + (p ? (left.length ? '참석자 추가…' : '참여자를 모두 넣었습니다') : '과제를 먼저 고르세요') + '</option>' + left.map(function (n) { return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('') + '</select>'
-      + '<button type="button" class="btn btn-sm btn-outline-primary" data-action="auto-add"' + (!p ? ' disabled' : '') + ' title="금액 ÷ ' + nf.format(MCFG.perPersonMax) + '원 = 최소 인원까지 시트 순서대로 채웁니다"><i class="ti ti-wand me-1"></i>자동 추가</button>'
+      + '<select class="form-select form-select-sm w-auto" id="attendee-select"' + (!p ? ' disabled' : '') + '><option value="">' + (p ? ((leftIn.length || leftOut.length) ? '참석자 추가…' : '더 넣을 사람이 없습니다') : '과제를 먼저 고르세요') + '</option>'
+      + (minOut ? '<optgroup label="과제 참여자">' + leftIn.map(function (n) { return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('') + '</optgroup><optgroup label="미참여 연구원 (최소 ' + minOut + '명)">' + leftOut.map(function (n) { return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join('') + '</optgroup>' : leftIn.map(function (n) { return '<option value="' + esc(n) + '">' + esc(n) + '</option>'; }).join(''))
+      + '</select>'
+      + '<button type="button" class="btn btn-sm btn-outline-primary" data-action="auto-add"' + (!p ? ' disabled' : '') + ' title="금액 ÷ ' + nf.format(MCFG.perPersonMax) + '원 = 최소 인원까지 시트 순서대로 채웁니다' + (minOut ? ' (미참여 연구원 ' + minOut + '명 포함)' : '') + '"><i class="ti ti-wand me-1"></i>자동 추가</button>'
       + (c.attendees.length ? '<button type="button" class="btn btn-sm btn-ghost-secondary" data-action="clear-attendees">비우기</button>' : '')
       + '<span class="small ms-auto ' + (over ? 'text-danger fw-medium' : 'text-secondary') + '" id="per-head">' + (total ? total + '명 · 1인당 ' + won(ph) + (over ? ' · 한도 초과 → ' + need + '명 이상 필요' : '') : (Number(c.amount) > 0 ? won(c.amount) + ' → 최소 ' + need + '명' : '')) + '</span>'
       + '</div>'
+      + (minOut ? '<div class="form-hint ' + (curOut >= minOut ? 'text-success' : 'text-warning') + '"><i class="ti ti-' + (curOut >= minOut ? 'check' : 'alert-triangle') + ' me-1"></i>' + esc(p.alias || p.name) + ' 규칙: 이 과제에 참여하지 않는 연구원을 ' + minOut + '명 이상 포함해야 합니다 (현재 ' + curOut + '명).</div>' : '')
       + (p && !names.length ? '<div class="form-hint text-warning">이 과제에 ' + (mk ? mk.replace('-', '년 ') + '월' : '해당 월') + ' 참여자가 없습니다.</div>' : '')
       + '<div class="mt-2"><label class="form-label mb-1">기타 참석자 <span class="form-label-description">시트에 없는 사람 (교수·행정·외부), 쉼표 구분</span></label><input type="text" class="form-control form-control-sm" name="others" value="' + esc(c.others) + '" placeholder="예: 권지민"></div>';
     return html;
@@ -202,10 +232,11 @@
     if (!c.heldAt) { var now = new Date(); now.setMinutes(0, 0, 0); c.heldAt = now.toISOString(); }
     var mk = monthKey(c.heldAt);
     var mineP = myProjects(mk);
+    var ruleKeys = Object.keys(MCFG.projectRules || {});
     var body = '<div class="card-body"><div class="row g-4"><div class="col-lg-7">'
       + '<h3 class="card-title mb-1"><i class="ti ti-receipt me-1 text-primary"></i>회의비 청구</h3>'
       + '<p class="text-secondary small mb-3">사용 카드와 과제를 고르고 그 과제의 참여자 중에서 참석자를 배정하면 승인 없이 바로 처리됩니다. 제출하면 회의록(영수증 첨부) 작성 화면으로 넘어갑니다.</p>'
-      + (!mineP.length ? '<div class="alert alert-warning py-2"><i class="ti ti-alert-triangle me-1"></i>참여과제 시트에서 <strong>' + esc(state.session.user.name) + '</strong> 이름을 찾지 못했습니다. 포털 이름을 시트와 같게 하거나 관리자에게 시트 갱신을 요청하세요. (아래에는 시트에 있는 모든 과제가 보입니다)</div>' : '')
+      + (!mineP.length ? '<div class="alert alert-warning py-2"><i class="ti ti-alert-triangle me-1"></i>참여과제 시트에서 <strong>' + esc(state.session.user.name) + '</strong> 이름을 찾지 못했습니다. 포털 이름을 시트와 같게 하거나 관리자에게 시트 갱신을 요청하세요.</div>' : '')
       + '<form id="meeting-form"><div class="row g-3">'
       + '<div class="col-12"><label class="form-label required">회의명</label><input type="text" class="form-control" name="title" required placeholder="예: 과제 목표 달성을 위한 논의"></div>'
       + '<div class="col-sm-6"><label class="form-label required">회의 일시 <span class="form-label-description">결제 시각</span></label><input type="datetime-local" class="form-control" name="heldAt" required value="' + esc(toLocalInput(c.heldAt)) + '"></div>'
@@ -227,7 +258,8 @@
     body += '<h3 class="card-title mt-4 mb-2"><i class="ti ti-info-circle me-1 text-primary"></i>규칙</h3><ul class="text-secondary small mb-0 ps-3">'
       + '<li>회의비는 <strong>1인당 ' + won(MCFG.perPersonMax) + '</strong>을 넘을 수 없습니다. 금액을 적으면 필요한 최소 인원이 보이고, 자동 추가가 시트 순서대로 참석자를 채웁니다.</li>'
       + '<li>참석자는 고른 과제의 <strong>참여연구원</strong>(참여과제 시트, 회의 월 기준)만 배정할 수 있습니다. 시트에 없는 사람은 기타 참석자로 적히며 인원수에는 들어갑니다.</li>'
-      + '<li>제출 즉시 과제 회의비에서 차감되고, 회의록(회의일자·결제시간·회의명·회의내용·장소·인원·참석자·계정·금액 + 영수증)을 작성해 DOCX로 내려받습니다.</li>'
+      + ruleKeys.map(function (k) { var r = MCFG.projectRules[k]; return '<li><strong>' + esc(k) + '</strong>: 이 과제에 참여하지 않는 연구원(미참여)을 <strong>' + esc(r.minNonParticipants) + '명 이상</strong> 꼭 포함해야 합니다. 자동 추가가 먼저 채워 넣습니다.</li>'; }).join('')
+      + '<li>제출 즉시 과제 회의비에서 차감되고, 회의록(회의일자·결제시간·회의명·회의내용·장소·인원·참석자·계정·금액 + 영수증)을 작성해 DOCX로 내려받습니다. 모든 처리는 <a href="#log" data-action="tab" data-tab="log">처리 로그</a>에 남습니다.</li>'
       + '<li>' + (state.importInfo ? '시트: ' + esc(state.importInfo.source) + (state.importInfo.months && state.importInfo.months.length ? ' (' + esc(state.importInfo.months[0]) + ' ~ ' + esc(state.importInfo.months[state.importInfo.months.length - 1]) + ')' : '') : '아직 가져온 참여과제 시트가 없습니다.') + '</li></ul>'
       + '</div></div></div>';
     return { body: body };
@@ -242,17 +274,22 @@
     if (!p) { toast('과제를 먼저 고르세요.', true); return; }
     if (!(Number(c.amount) > 0)) { toast('사용 금액을 먼저 적으세요.', true); return; }
     var mk = monthKey(c.heldAt);
-    var names = eligibleNames(p, mk);
     var me = nameKey(state.session.user.name);
-    names.sort(function (a, b) { return (nameKey(a) === me ? -1 : 0) - (nameKey(b) === me ? -1 : 0); });
+    var meFirst = function (list) { return list.slice().sort(function (a, b) { return (nameKey(a) === me ? -1 : 0) - (nameKey(b) === me ? -1 : 0); }); };
+    var names = meFirst(eligibleNames(p, mk));
+    var minOut = minOutsiders(p);
+    var outs = minOut ? meFirst(outsiderNames(p, mk)) : [];
     var need = minPeople(c.amount), added = 0;
-    for (var i = 0; i < names.length && claimTotal() < need; i++) {
-      if (c.attendees.indexOf(names[i]) >= 0) continue;
-      c.attendees.push(names[i]); added++;
-    }
+    var add = function (n) { if (c.attendees.indexOf(n) < 0) { c.attendees.push(n); added++; return true; } return false; };
+    /* 1) 규칙 과제: 미참여 연구원 최소 인원부터 */
+    for (var i = 0; i < outs.length && claimOutsiders().length < minOut; i++) add(outs[i]);
+    /* 2) 참여자로 최소 인원 채우기 */
+    for (var j = 0; j < names.length && claimTotal() < need; j++) add(names[j]);
+    /* 3) 그래도 모자라면(규칙 과제) 미참여 연구원으로 */
+    for (var k = 0; k < outs.length && claimTotal() < need; k++) add(outs[k]);
     refreshAttendeeBlock();
-    if (claimTotal() < need) toast('참여자 ' + names.length + '명으로는 1인당 ' + won(MCFG.perPersonMax) + ' 한도를 못 맞춥니다 (' + need + '명 필요). 금액을 나누거나 기타 참석자를 적으세요.', true);
-    else toast(added ? added + '명을 자동으로 추가했습니다 (총 ' + claimTotal() + '명, 1인당 ' + won(perHead()) + ').' : '이미 인원이 충분합니다 (' + claimTotal() + '명).');
+    if (claimTotal() < need) toast('시트의 참여자(' + names.length + '명)' + (minOut ? '와 미참여 연구원(' + outs.length + '명)' : '') + '으로는 1인당 ' + won(MCFG.perPersonMax) + ' 한도를 못 맞춥니다 (' + need + '명 필요). 금액을 나누거나 기타 참석자를 적으세요.', true);
+    else toast(added ? added + '명을 자동으로 추가했습니다 (총 ' + claimTotal() + '명, 1인당 ' + won(perHead()) + (minOut ? ', 미참여 ' + claimOutsiders().length + '명' : '') + ').' : '이미 인원이 충분합니다 (' + claimTotal() + '명).');
   }
 
   /* ---------- 청구 내역 탭 ---------- */
@@ -262,7 +299,7 @@
     var m = r.meta || {};
     var own = isMine(r);
     var html = '<tr data-id="' + esc(r.id) + '"><td class="text-nowrap text-secondary">' + fmtDate(m.heldAt || r.createdAt) + '</td><td class="text-nowrap">' + esc(r.requesterName) + '</td>'
-      + '<td><div class="fw-medium">' + esc(m.title || r.item) + '</div><div class="small text-secondary">' + esc(m.place || '') + (m.attendees ? ' · ' + (m.attendeeCount || attendeeCount(m.attendees)) + '명' : '') + (m.payment ? ' · ' + esc(PAY[m.payment] || m.payment) : '') + '</div>'
+      + '<td><div class="fw-medium">' + esc(m.title || r.item) + '</div><div class="small text-secondary">' + esc(m.place || '') + (m.attendees ? ' · ' + (m.attendeeCount || attendeeCount(m.attendees)) + '명' : '') + (m.outsiders ? ' · 미참여 ' + esc(m.outsiders) : '') + (m.payment ? ' · ' + esc(PAY[m.payment] || m.payment) : '') + '</div>'
       + (r.status === 'rejected' && r.adminNote ? '<div class="small text-danger">반려 사유: ' + esc(r.adminNote) + '</div>' : '') + '</td>'
       + '<td class="text-end tnum text-nowrap fw-medium">' + won(r.amount) + (m.attendeeCount ? '<div class="small text-secondary fw-normal">1인 ' + won(r.amount / m.attendeeCount) + '</div>' : '') + '</td>';
     if (admin && r.status === 'pending') {
@@ -294,6 +331,37 @@
     return { body: body };
   }
 
+  /* ---------- 처리 로그 탭 ---------- */
+  function visibleLogs() {
+    var admin = isAdminActive(); var me = state.session.user.id;
+    return state.logs.filter(function (l) { return admin || l.byId === me || l.requesterId === me || ['import', 'sync', 'link', 'code'].indexOf(l.type) >= 0; })
+      .filter(function (l) { return state.logFilter === 'all' || l.type === state.logFilter || (state.logFilter === 'minutes' && l.type.indexOf('minutes') === 0); });
+  }
+  function renderLogTab() {
+    var admin = isAdminActive();
+    var list = visibleLogs();
+    var lchip = function (val, label) { return '<button type="button" class="btn btn-sm ' + (state.logFilter === val ? 'btn-primary' : 'btn-outline-secondary') + '" data-action="log-filter" data-filter="' + val + '">' + label + '</button>'; };
+    var body = '<div class="card-body py-2 border-bottom d-flex flex-wrap align-items-center gap-2"><div class="btn-group">' + lchip('all', '전체') + lchip('claim', '청구·처리') + lchip('minutes', '회의록') + lchip('delete', '삭제') + lchip('import', '시트') + '</div>'
+      + '<span class="small text-secondary">' + (admin ? '전체 로그' : '내 청구 관련 로그') + ' ' + list.length + '건 · 추가만 되고 지울 수 없습니다</span>'
+      + '<button type="button" class="btn btn-sm ms-auto" data-action="export-log"' + (list.length ? '' : ' disabled') + '><i class="ti ti-file-spreadsheet me-1"></i>CSV</button></div>';
+    if (!list.length) body += '<div class="card-body">' + empty('history', '처리 로그가 없습니다', '회의비를 청구하거나 회의록을 제출하면 여기에 남습니다.') + '</div>';
+    else body += '<div class="table-responsive"><table class="table table-vcenter card-table table-sm"><thead><tr><th class="w-1">일시</th><th class="w-1">구분</th><th class="w-1">처리자</th><th>회의 · 과제</th><th class="text-end">금액 · 인원</th><th>내용</th></tr></thead><tbody>'
+      + list.map(function (l) {
+        var T = LOG_TYPES[l.type] || { label: l.type, cls: 'bg-secondary-lt' };
+        return '<tr><td class="text-nowrap text-secondary small">' + fmtDateTime(l.at) + '</td><td><span class="badge ' + T.cls + '">' + esc(T.label) + '</span></td><td class="text-nowrap">' + esc(l.by || '-') + '</td>'
+          + '<td>' + (l.title ? '<div class="fw-medium">' + esc(l.title) + '</div>' : '') + '<div class="small text-secondary">' + (l.requesterName ? '청구자 ' + esc(l.requesterName) + ' · ' : '') + esc(l.project || '') + (l.code ? ' (' + esc(l.code) + ')' : '') + (l.requestId ? ' · <a href="../report/index.html#id=' + esc(l.requestId) + '">회의록</a>' : '') + '</div></td>'
+          + '<td class="text-end text-nowrap tnum">' + (l.amount ? won(l.amount) : '') + (l.count ? '<div class="small text-secondary">' + l.count + '명 · 1인 ' + won(l.perHead) + '</div>' : '') + '</td>'
+          + '<td class="small">' + esc(l.detail || '') + (l.attendees ? '<div class="text-secondary">' + esc(l.attendees) + '</div>' : '') + '</td></tr>';
+      }).join('') + '</tbody></table></div>';
+    return { body: body };
+  }
+  function exportLogCsv() {
+    var list = visibleLogs();
+    var head = ['일시', '구분', '처리자', '청구자', '회의명', '과제', '과제번호', '금액', '인원', '1인당', '참석자', '내용', '요청 id'];
+    var lines = list.map(function (l) { return [fmtDateTime(l.at), (LOG_TYPES[l.type] || {}).label || l.type, l.by, l.requesterName, l.title, l.project, l.code, l.amount, l.count, l.perHead, l.attendees, l.detail, l.requestId || ''].map(csvCell).join(','); });
+    download('dsil-meeting-log-' + new Date().toISOString().slice(0, 10) + '.csv', '﻿' + head.join(',') + '\r\n' + lines.join('\r\n'), 'text/csv;charset=utf-8');
+  }
+
   /* ---------- 관리자 탭 ---------- */
   function monthsSummary(part) {
     var m = part.months || {}; var off = Object.keys(m).filter(function (k) { return !m[k]; });
@@ -301,23 +369,38 @@
     if (off.length === Object.keys(m).length) return ' <span class="badge bg-red-lt">전 기간 미참여</span>';
     return off.length ? ' <span class="text-secondary small">(' + off.map(function (k) { return k.slice(5).replace(/^0/, '') + '월 ×'; }).join(', ') + ')</span>' : '';
   }
+  function sheetAliasList() { var out = []; state.rows.forEach(function (r) { if (out.indexOf(r.project) < 0) out.push(r.project); }); return out; }
 
   function renderAdminTab() {
     if (!isAdminActive()) return { body: '<div class="card-body">' + empty('lock', '관리자 화면이 잠겨 있습니다', '관리자 PIN을 입력하면 열립니다.') + '<div class="text-center"><button type="button" class="btn btn-primary" data-action="unlock-admin"><i class="ti ti-key me-1"></i>PIN 입력</button></div></div>' };
     var pending = meetings().filter(function (r) { return r.status === 'pending'; });
     var info = state.importInfo;
-    var sheetProjects = state.projects.filter(function (p) { return p.alias || hasSheet(p); });
-    var body = '<div class="card-body py-2 d-flex align-items-center justify-content-between flex-wrap gap-2 border-bottom"><div class="text-secondary small"><i class="ti ti-lock-open me-1"></i>관리자 모드 · 회의비는 청구 즉시 처리되므로 여기서는 참여과제 시트 관리와 이전 방식 청구(미처리)만 다룹니다.</div>'
+    var aliases = sheetAliasList();
+    var projects = state.projects.filter(function (p) { return p.active !== false; });
+    var unlinkedAliases = aliases.filter(function (a) { return !projects.some(function (p) { return nameKey(p.alias) === nameKey(a); }); });
+    var noAlias = projects.filter(function (p) { return !p.alias; });
+    var body = '<div class="card-body py-2 d-flex align-items-center justify-content-between flex-wrap gap-2 border-bottom"><div class="text-secondary small"><i class="ti ti-lock-open me-1"></i>관리자 모드 · 회의비는 청구 즉시 처리되므로 여기서는 참여과제 시트와 과제 목록 동기화, 이전 방식 청구(미처리)만 다룹니다.</div>'
       + '<button type="button" class="btn btn-sm btn-ghost-secondary" data-action="lock-admin"><i class="ti ti-lock me-1"></i>잠금</button></div>';
+    /* 시트 */
     body += '<div class="card-body border-bottom"><div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-2"><div><h3 class="card-title mb-1"><i class="ti ti-table me-1 text-primary"></i>참여과제 시트</h3>'
       + '<div class="small text-secondary">' + (info ? '가져온 파일 <strong>' + esc(info.source) + '</strong>' + (info.importedAt ? ' · ' + fmtDateTime(info.importedAt) + (info.importedBy ? ' · ' + esc(info.importedBy) : '') : '') + ' · ' + info.rows + '행 · 과제 ' + info.projects + '개' + (info.months && info.months.length ? ' · ' + esc(info.months[0]) + ' ~ ' + esc(info.months[info.months.length - 1]) : '') : '아직 가져온 시트가 없습니다.') + '</div></div>'
-      + '<label class="btn btn-sm btn-primary mb-0"><i class="ti ti-upload me-1"></i>엑셀 가져오기<input type="file" accept=".xlsx,.xlsm,.xls" hidden data-action="import-sheet"></label></div>'
-      + '<div class="small text-secondary mb-2">엑셀 1행에 9월·10월… 같은 월 제목, B열 성명, C열 참여과제(약칭). 회색 칸은 미참여로 읽습니다. 파일 이름의 날짜(예: 260827)로 연도를 정합니다. 가져오면 같은 약칭의 과제에 참여자 목록을 덮어쓰고, 없는 과제는 새로 만듭니다.</div>';
-    if (!sheetProjects.length) body += empty('table-off', '참여과제 정보가 없습니다', '엑셀을 가져오면 과제별 참여자가 여기에 나옵니다.');
-    else body += '<div class="table-responsive"><table class="table table-sm table-vcenter card-table"><thead><tr><th class="w-1">약칭</th><th class="w-1">과제번호(계정)</th><th>참여자</th><th class="w-1 text-end">인원</th></tr></thead><tbody>'
-      + sheetProjects.map(function (p) { return '<tr data-project="' + esc(p.id) + '"><td class="fw-medium text-nowrap">' + esc(p.alias || p.name) + (p.name !== (p.alias || p.name) ? '<div class="small text-secondary fw-normal">' + esc(p.name) + '</div>' : '') + '</td><td class="text-nowrap"><div class="input-group input-group-sm" style="min-width:12rem"><input type="text" class="form-control" data-role="proj-code" value="' + esc(p.code || '') + '" placeholder="N01261349"><button type="button" class="btn" data-action="save-code" title="과제번호 저장"><i class="ti ti-device-floppy"></i></button></div>' + (!p.code ? '<div class="text-warning small">미입력 · 회의록 계정란에 들어갑니다</div>' : '') + '</td><td class="small">' + (p.participants || []).map(function (x) { return esc(x.name) + monthsSummary(x); }).join(', ') + '</td><td class="text-end tnum">' + (p.participants || []).length + '</td></tr>'; }).join('')
+      + '<div class="d-flex gap-2"><label class="btn btn-sm mb-0"><i class="ti ti-upload me-1"></i>엑셀 가져오기<input type="file" accept=".xlsx,.xlsm,.xls" hidden data-action="import-sheet"></label>'
+      + '<button type="button" class="btn btn-sm btn-primary" data-action="sync-sheet" title="시트의 모든 과제를 과제 목록과 연결하고, 목록에만 있는 과제는 자기 이름을 약칭으로 시트에 넣습니다"><i class="ti ti-refresh me-1"></i>과제 목록과 동기화</button></div></div>'
+      + '<div class="small text-secondary mb-2">엑셀 1행에 9월·10월… 같은 월 제목, B열 성명, C열 참여과제(약칭). 회색 칸은 미참여로 읽습니다. 동기화는 약칭과 과제 이름이 같거나 한쪽이 다른 쪽을 포함하면 자동으로 연결하고, 시트에서 자동 생성된 중복 과제는 기존 과제로 합칩니다(청구·요청도 함께 옮김).</div>'
+      + ((unlinkedAliases.length || noAlias.length) ? '<div class="alert alert-warning py-2 mb-2"><i class="ti ti-alert-triangle me-1"></i>' + (unlinkedAliases.length ? '시트에만 있는 과제: ' + esc(unlinkedAliases.join(', ')) + '. ' : '') + (noAlias.length ? '약칭이 없는 과제: ' + esc(noAlias.map(function (p) { return p.name; }).join(', ')) + '. ' : '') + '동기화를 누르면 맞춥니다.</div>' : '<div class="text-success small mb-2"><i class="ti ti-check me-1"></i>과제 목록과 시트가 맞춰져 있습니다.</div>');
+    if (!projects.length) body += empty('table-off', '과제가 없습니다', '엑셀을 가져오거나 구매 요청 관리자 탭에서 과제를 등록하세요.');
+    else body += '<div class="table-responsive"><table class="table table-sm table-vcenter card-table"><thead><tr><th>과제</th><th class="w-1">시트 약칭</th><th class="w-1">과제번호(계정)</th><th>참여자</th><th class="w-1 text-end">인원</th></tr></thead><tbody>'
+      + projects.map(function (p) {
+        var opts = '<option value=""' + (!p.alias ? ' selected' : '') + '>연결 안 함</option>' + aliases.map(function (a) { return '<option value="' + esc(a) + '"' + (nameKey(a) === nameKey(p.alias) ? ' selected' : '') + '>' + esc(a) + '</option>'; }).join('') + (p.alias && aliases.every(function (a) { return nameKey(a) !== nameKey(p.alias); }) ? '<option value="' + esc(p.alias) + '" selected>' + esc(p.alias) + ' (시트에 없음)</option>' : '');
+        var rule = ruleOf(p);
+        return '<tr data-project="' + esc(p.id) + '"><td><div class="fw-medium">' + esc(p.name) + '</div><div class="small text-secondary">' + (p.note === '참여과제 시트에서 자동 생성' ? '<span class="badge bg-purple-lt">시트에서 생성</span> ' : '') + (rule ? '<span class="badge bg-orange-lt">미참여 ' + esc(rule.minNonParticipants) + '명 필수</span> ' : '') + (p.manager ? esc(p.manager) : '') + '</div></td>'
+          + '<td><select class="form-select form-select-sm" data-role="proj-alias">' + opts + '</select></td>'
+          + '<td><div class="input-group input-group-sm" style="min-width:11rem"><input type="text" class="form-control" data-role="proj-code" value="' + esc(p.code || '') + '" placeholder="N01261349"><button type="button" class="btn" data-action="save-code" title="과제번호 저장"><i class="ti ti-device-floppy"></i></button></div>' + (!p.code ? '<div class="text-warning small">미입력 · 회의록 계정란</div>' : '') + '</td>'
+          + '<td class="small">' + ((p.participants || []).length ? (p.participants || []).map(function (x) { return esc(x.name) + monthsSummary(x); }).join(', ') : '<span class="text-secondary">없음</span>') + '</td><td class="text-end tnum">' + (p.participants || []).length + '</td></tr>';
+      }).join('')
       + '</tbody></table></div>';
     body += '</div>';
+    /* 이전 방식 미처리 */
     body += '<div class="card-body"><h3 class="card-title mb-2"><i class="ti ti-hourglass me-1 text-primary"></i>미처리 회의비 (이전 방식)</h3>';
     if (!pending.length) body += '<div class="text-secondary small">미처리 회의비가 없습니다.</div></div>';
     else body += '</div><div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th class="w-1">회의일</th><th class="w-1">청구자</th><th>회의</th><th class="text-end">금액</th><th>상태</th><th>배정</th><th class="w-1"></th></tr></thead><tbody>' + pending.map(function (r) { return row(r, true); }).join('') + '</tbody></table></div>';
@@ -379,7 +462,7 @@
       + dg('금액', '<span class="tnum">' + won(r.amount) + '</span>' + (n ? ' <span class="text-secondary small">(' + n + '명 · 1인 ' + won(r.amount / n) + ')</span>' : '')) + dg('사용 카드', esc(PAY[m.payment] || m.payment || '-'))
       + dg('상태', (r.status === 'done' ? reportBadge(r) : '<span class="badge ' + st.cls + '">' + st.label + '</span>') + (r.processedAt ? ' <span class="text-secondary small">' + fmtDate(r.processedAt) + (r.processedBy ? ' · ' + esc(r.processedBy) : '') + '</span>' : ''))
       + (p ? dg('과제', esc(p.alias || p.name) + ' <span class="text-secondary small">' + esc(p.code || '') + ' · ' + esc(catLabel(normCat(r.category))) + '</span>') : '') + '</div>'
-      + '<div class="mb-3"><div class="subheader">참석자</div><div>' + esc(m.attendees || '-') + (m.others ? ' <span class="text-secondary">(기타: ' + esc(m.others) + ')</span>' : '') + '</div></div>'
+      + '<div class="mb-3"><div class="subheader">참석자</div><div>' + esc(m.attendees || '-') + (m.outsiders ? ' <span class="text-orange">(미참여 연구원: ' + esc(m.outsiders) + ')</span>' : '') + (m.others ? ' <span class="text-secondary">(기타: ' + esc(m.others) + ')</span>' : '') + '</div></div>'
       + '<div class="mb-3"><div class="subheader">회의 내용 · 안건</div><div style="white-space:pre-wrap">' + esc(m.purpose || '-') + '</div></div>'
       + (r.note ? '<div class="mb-3"><div class="subheader">비고</div><div>' + esc(r.note) + '</div></div>' : '')
       + (r.adminNote ? '<div class="alert alert-' + (r.status === 'rejected' ? 'danger' : 'info') + ' py-2 mb-0"><div class="small fw-medium">관리자 메모</div>' + esc(r.adminNote) + '</div>' : '');
@@ -389,20 +472,32 @@
   function exportCsv() {
     var admin = isAdminActive();
     var list = meetings().filter(function (r) { return (admin || isMine(r)) && (state.filter === 'all' || r.status === state.filter); });
-    var head = ['회의일시', '회의명', '장소', '참석자', '인원', '금액', '1인당', '사용 카드', '청구자', '상태', '회의록', '과제', '과제번호', '비목', '처리일', '처리자', '내용', '비고'];
+    var head = ['회의일시', '회의명', '장소', '참석자', '미참여 연구원', '인원', '금액', '1인당', '사용 카드', '청구자', '상태', '회의록', '과제', '과제번호', '비목', '처리일', '처리자', '내용', '비고'];
     var lines = list.map(function (r) { var m = r.meta || {}; var p = r.projectId ? projectById(r.projectId) : null; var n = m.attendeeCount || attendeeCount(m.attendees);
-      return [fmtDateTime(m.heldAt || r.createdAt), m.title || r.item, m.place || '', m.attendees || '', n, r.amount, n ? Math.round(r.amount / n) : '', PAY[m.payment] || m.payment || '', r.requesterName, (STATUS[r.status] || {}).label || r.status, r.report ? (RSTATUS[r.report.status] || {}).label || r.report.status : (r.status === 'done' ? '미작성' : ''), p ? (p.alias || p.name) : '', p ? p.code : '', catLabel(normCat(r.category)), localDate(r.processedAt), r.processedBy || '', m.purpose || '', r.note].map(csvCell).join(','); });
+      return [fmtDateTime(m.heldAt || r.createdAt), m.title || r.item, m.place || '', m.attendees || '', m.outsiders || '', n, r.amount, n ? Math.round(r.amount / n) : '', PAY[m.payment] || m.payment || '', r.requesterName, (STATUS[r.status] || {}).label || r.status, r.report ? (RSTATUS[r.report.status] || {}).label || r.report.status : (r.status === 'done' ? '미작성' : ''), p ? (p.alias || p.name) : '', p ? p.code : '', catLabel(normCat(r.category)), localDate(r.processedAt), r.processedBy || '', m.purpose || '', r.note].map(csvCell).join(','); });
     download('dsil-meeting-' + new Date().toISOString().slice(0, 10) + '.csv', '﻿' + head.join(',') + '\r\n' + lines.join('\r\n'), 'text/csv;charset=utf-8');
   }
 
   /* ---------- actions ---------- */
   function handleError(err) { console.error(err); toast(err && err.message ? err.message : String(err), true); }
   function refresh() { return reload().then(render).catch(handleError); }
+  function updatePerHead() {
+    var ph = $('#per-head'); if (!ph) return;
+    var total = claimTotal(), need = minPeople(state.claim.amount), over = total && perHead() > MCFG.perPersonMax;
+    ph.className = 'small ms-auto ' + (over ? 'text-danger fw-medium' : 'text-secondary');
+    ph.textContent = total ? total + '명 · 1인당 ' + won(perHead()) + (over ? ' · 한도 초과 → ' + need + '명 이상 필요' : '') : (state.claim.amount > 0 ? won(state.claim.amount) + ' → 최소 ' + need + '명' : '');
+  }
+  function syncClaimFromForm() {
+    var f = $('#meeting-form'); if (!f) return;
+    state.claim.amount = Math.max(0, Math.round(Number(f.amount.value) || 0)); state.claim.projectId = f.projectId.value;
+    var d = new Date(f.heldAt.value); if (!isNaN(d)) state.claim.heldAt = d.toISOString();
+    state.claim.others = f.others ? f.others.value : '';
+  }
 
   document.addEventListener('input', function (e) {
     var f = e.target.closest('#meeting-form'); if (!f) return;
-    if (e.target.name === 'amount') { state.claim.amount = Math.max(0, Math.round(Number(e.target.value) || 0)); var ph = $('#per-head'); if (ph) { var total = claimTotal(), need = minPeople(state.claim.amount), over = total && perHead() > MCFG.perPersonMax; ph.className = 'small ms-auto ' + (over ? 'text-danger fw-medium' : 'text-secondary'); ph.textContent = total ? total + '명 · 1인당 ' + won(perHead()) + (over ? ' · 한도 초과 → ' + need + '명 이상 필요' : '') : (state.claim.amount > 0 ? won(state.claim.amount) + ' → 최소 ' + need + '명' : ''); } }
-    if (e.target.name === 'others') { state.claim.others = e.target.value; var chips = $('#attendee-chips'); if (chips) { var ph2 = $('#per-head'); if (ph2) ph2.textContent = claimTotal() ? claimTotal() + '명 · 1인당 ' + won(perHead()) : ''; } }
+    if (e.target.name === 'amount') { state.claim.amount = Math.max(0, Math.round(Number(e.target.value) || 0)); updatePerHead(); }
+    if (e.target.name === 'others') { state.claim.others = e.target.value; updatePerHead(); }
   });
 
   document.addEventListener('change', function (e) {
@@ -410,10 +505,10 @@
     if (el.name === 'projectId' && el.closest('#meeting-form')) {
       state.claim.projectId = el.value;
       var p = el.value ? projectById(el.value) : null; var mk = monthKey(state.claim.heldAt);
-      var ok = p ? eligibleNames(p, mk) : [];
-      var dropped = state.claim.attendees.filter(function (n) { return ok.indexOf(n) < 0; });
-      state.claim.attendees = state.claim.attendees.filter(function (n) { return ok.indexOf(n) >= 0; });
-      if (dropped.length) toast('이 과제 참여자가 아니어서 뺐습니다: ' + dropped.join(', '), true);
+      var allowed = p ? eligibleNames(p, mk).concat(minOutsiders(p) ? outsiderNames(p, mk) : []) : [];
+      var dropped = state.claim.attendees.filter(function (n) { return allowed.indexOf(n) < 0; });
+      state.claim.attendees = state.claim.attendees.filter(function (n) { return allowed.indexOf(n) >= 0; });
+      if (dropped.length) toast('이 과제에 넣을 수 없어 뺐습니다: ' + dropped.join(', '), true);
       refreshAttendeeBlock();
       return;
     }
@@ -428,11 +523,19 @@
       refreshAttendeeBlock();
       return;
     }
+    if (el.getAttribute('data-role') === 'proj-alias') {
+      var prow = el.closest('tr[data-project]'); var proj = prow && projectById(prow.getAttribute('data-project'));
+      if (!proj) return;
+      var alias = el.value;
+      store.linkProjectAlias(proj.id, alias).then(function () { return logPlain('link', proj.name + ' → ' + (alias || '연결 해제')); }).then(function () { toast(proj.name + (alias ? ' 을(를) ' + alias + ' 시트와 연결했습니다.' : ' 연결을 해제했습니다.')); touchUnlock(); return refresh(); }).catch(handleError);
+      return;
+    }
     if (el.getAttribute('data-action') === 'import-sheet') {
       var file = el.files && el.files[0]; if (!file) return;
       toast('시트를 읽는 중…');
       parseSheet(file).then(function (payload) {
-        return confirmDlg({ title: '참여과제 시트 가져오기', message: payload.source + ': ' + payload.rows.length + '행, 과제 ' + Object.keys(payload.rows.reduce(function (o, r) { o[r.project] = 1; return o; }, {})).length + '개' + (payload.months.length ? ', ' + payload.months[0] + ' ~ ' + payload.months[payload.months.length - 1] : '') + '. 같은 약칭의 과제 참여자 목록을 덮어씁니다.', okLabel: '가져오기' }).then(function (ok) { if (!ok) return; return store.importParticipation(payload).then(function (info) { toast('가져왔습니다: 과제 ' + info.projects + '개 (새로 ' + info.created + ', 갱신 ' + info.updated + ')'); touchUnlock(); return refresh(); }); });
+        var nProj = Object.keys(payload.rows.reduce(function (o, r) { o[r.project] = 1; return o; }, {})).length;
+        return confirmDlg({ title: '참여과제 시트 가져오기', message: payload.source + ': ' + payload.rows.length + '행, 과제 ' + nProj + '개' + (payload.months.length ? ', ' + payload.months[0] + ' ~ ' + payload.months[payload.months.length - 1] : '') + '. 같은 약칭의 과제 참여자 목록을 덮어쓰고 과제 목록과 동기화합니다.', okLabel: '가져오기' }).then(function (ok) { if (!ok) return; return store.importParticipation(payload).then(function (info) { return logPlain('import', payload.source + ' · ' + payload.rows.length + '행 · 과제 ' + info.projects + '개 (새로 ' + info.created + ', 연결 ' + (info.linked || []).length + ', 병합 ' + (info.merged || []).length + ')').then(function () { toast('가져왔습니다: 과제 ' + info.projects + '개 (새로 ' + info.created + ', 갱신 ' + info.updated + ')'); touchUnlock(); return refresh(); }); }); });
       }).catch(handleError);
       el.value = '';
       return;
@@ -457,9 +560,11 @@
     if (!v.title.trim()) { toast('회의명을 입력하세요.', true); return; }
     if (!p) { toast('과제를 선택하세요.', true); return; }
     if (amount <= 0) { toast('사용 금액을 입력하세요.', true); return; }
-    var mk = monthKey(c.heldAt); var ok = eligibleNames(p, mk);
-    var bad = c.attendees.filter(function (n) { return ok.indexOf(n) < 0; });
+    var mk = monthKey(c.heldAt); var ok = eligibleNames(p, mk); var minOut = minOutsiders(p); var outsPool = minOut ? outsiderNames(p, mk) : [];
+    var outs = c.attendees.filter(function (n) { return ok.indexOf(n) < 0; });
+    var bad = outs.filter(function (n) { return outsPool.indexOf(n) < 0; });
     if (bad.length) { toast('이 과제 참여자가 아닙니다: ' + bad.join(', '), true); return; }
+    if (minOut && outs.length < minOut) { toast((p.alias || p.name) + ' 규칙: 이 과제에 참여하지 않는 연구원을 ' + minOut + '명 이상 포함해야 합니다 (현재 ' + outs.length + '명). 참석자 추가에서 미참여 연구원을 고르거나 자동 추가를 누르세요.', true); return; }
     var others = splitNames(c.others);
     var names = c.attendees.concat(others);
     if (!names.length) { toast('참석자를 배정하세요. 자동 추가를 누르면 금액에 맞춰 채워집니다.', true); return; }
@@ -471,10 +576,12 @@
     warn.then(function (go) {
       if (!go) return;
       var now = new Date().toISOString();
+      var meta = { title: v.title.trim(), heldAt: c.heldAt, place: v.place.trim(), attendees: names.join(', '), attendeeList: c.attendees.slice(), outsiders: outs.join(', '), others: others.join(', '), attendeeCount: names.length, payment: v.payment, purpose: v.purpose.trim(), suggestedProjectId: p.id, auto: true };
       return store.createRequest({
         kind: 'meeting', item: '회의비 · ' + v.title.trim(), category: cat, link: '', qty: 1, unitPrice: amount, amount: amount, note: (v.note || '').trim(),
-        status: 'done', projectId: p.id, processedAt: now, processedBy: MCFG.autoProcessedBy,
-        meta: { title: v.title.trim(), heldAt: c.heldAt, place: v.place.trim(), attendees: names.join(', '), attendeeList: c.attendees.slice(), others: others.join(', '), attendeeCount: names.length, payment: v.payment, purpose: v.purpose.trim(), suggestedProjectId: p.id, auto: true }
+        status: 'done', projectId: p.id, processedAt: now, processedBy: MCFG.autoProcessedBy, meta: meta
+      }).then(function (rec) {
+        return logFor(rec, 'claim', '사용 카드 ' + (PAY[v.payment] || v.payment) + ' · ' + (p.alias || p.name) + ' 과제로 즉시 처리' + (outs.length ? ' · 미참여 연구원 ' + outs.join(', ') : '') + (others.length ? ' · 기타 ' + others.join(', ') : '')).then(function () { return rec; });
       }).then(function (rec) {
         toast('회의비를 ' + (p.alias || p.name) + ' 과제로 처리했습니다. 회의록을 작성합니다.');
         state.claim = { projectId: '', heldAt: '', amount: 0, attendees: [], others: '' };
@@ -488,6 +595,7 @@
     if (!btn || btn.tagName === 'INPUT') return;
     var action = btn.getAttribute('data-action');
     var tr = btn.closest('tr[data-id]'); var id = tr ? tr.getAttribute('data-id') : null;
+    var target = id ? state.requests.filter(function (x) { return x.id === id; })[0] : null;
     switch (action) {
       case 'tab': { e.preventDefault(); var t = btn.getAttribute('data-tab'); if (t === 'admin' && !isAdminActive()) { enterAdmin(); return; } state.tab = t; render(); break; }
       case 'unlock-admin': enterAdmin(); break;
@@ -495,34 +603,42 @@
       case 'signout': setUnlock(false); store.signOut().then(function () { window.location.replace('../index.html'); }); break;
       case 'refresh': refresh().then(function () { toast('새로고침 완료'); }); break;
       case 'filter': state.filter = btn.getAttribute('data-filter'); render(); break;
+      case 'log-filter': state.logFilter = btn.getAttribute('data-filter'); render(); break;
       case 'export-csv': exportCsv(); break;
+      case 'export-log': exportLogCsv(); break;
       case 'detail': showDetail(id).catch(handleError); break;
-      case 'auto-add': { var f = $('#meeting-form'); if (f) { state.claim.amount = Math.max(0, Math.round(Number(f.amount.value) || 0)); state.claim.projectId = f.projectId.value; var d = new Date(f.heldAt.value); if (!isNaN(d)) state.claim.heldAt = d.toISOString(); state.claim.others = f.others ? f.others.value : ''; } autoAdd(); break; }
+      case 'auto-add': syncClaimFromForm(); autoAdd(); break;
       case 'remove-attendee': state.claim.attendees = state.claim.attendees.filter(function (n) { return n !== btn.getAttribute('data-name'); }); refreshAttendeeBlock(); break;
+      case 'clear-attendees': state.claim.attendees = []; refreshAttendeeBlock(); break;
+      case 'sync-sheet':
+        store.syncProjectsWithSheet().then(function (res) {
+          var msg = '연결 ' + res.linked.length + ' · 새로 만든 과제 ' + res.created.length + ' · 병합 ' + res.merged.length + ' · 이름을 약칭으로 ' + res.aliased.length;
+          return logPlain('sync', msg + (res.linked.length ? ' · ' + res.linked.join(', ') : '') + (res.aliased.length ? ' · 약칭: ' + res.aliased.join(', ') : '')).then(function () { toast('동기화 완료: ' + msg); touchUnlock(); return refresh(); });
+        }).catch(handleError);
+        break;
       case 'save-code': {
         var prow = btn.closest('tr[data-project]'); var proj0 = prow && projectById(prow.getAttribute('data-project')); var inp = prow && prow.querySelector('[data-role="proj-code"]');
         if (!proj0 || !inp) return;
         var full = Object.assign({}, proj0, { code: inp.value.trim() });
-        store.saveProject(full).then(function () { toast((full.alias || full.name) + ' 과제번호를 저장했습니다.'); touchUnlock(); return refresh(); }).catch(handleError);
+        store.saveProject(full).then(function () { return logPlain('code', (full.alias || full.name) + ' 과제번호 → ' + (full.code || '(비움)')); }).then(function () { toast((full.alias || full.name) + ' 과제번호를 저장했습니다.'); touchUnlock(); return refresh(); }).catch(handleError);
         break;
       }
-      case 'clear-attendees': state.claim.attendees = []; refreshAttendeeBlock(); break;
       case 'assign': {
         var sel = tr.querySelector('select[data-role="assign-project"]'); var catSel = tr.querySelector('select[data-role="assign-cat"]');
         var pid = sel && sel.value; var cat = normCat(catSel && catSel.value);
         if (!pid) { toast('배정할 과제를 선택하세요.', true); return; }
-        var req = state.requests.filter(function (x) { return x.id === id; })[0]; var proj = projectById(pid); var remain = remainOf(proj, cat);
-        var ask = (Number(req.amount) || 0) > remain ? confirmDlg({ title: '비목 예산 초과', message: '이 과제의 ' + catLabel(cat) + ' 잔액은 ' + won(remain) + '이고 청구 금액은 ' + won(req.amount) + '입니다. 그래도 배정할까요?', okLabel: '초과 배정', danger: true }) : Promise.resolve(true);
-        ask.then(function (ok) { if (!ok) return; return store.updateRequest(id, { status: 'done', projectId: pid, category: cat, processedAt: new Date().toISOString(), processedBy: state.session.user.name, adminNote: '' }).then(function () { toast('처리 완료: ' + proj.name + ' · ' + catLabel(cat)); touchUnlock(); return refresh(); }); }).catch(handleError);
+        var proj = projectById(pid); var remain = remainOf(proj, cat);
+        var ask = (Number(target.amount) || 0) > remain ? confirmDlg({ title: '비목 예산 초과', message: '이 과제의 ' + catLabel(cat) + ' 잔액은 ' + won(remain) + '이고 청구 금액은 ' + won(target.amount) + '입니다. 그래도 배정할까요?', okLabel: '초과 배정', danger: true }) : Promise.resolve(true);
+        ask.then(function (ok) { if (!ok) return; return store.updateRequest(id, { status: 'done', projectId: pid, category: cat, processedAt: new Date().toISOString(), processedBy: state.session.user.name, adminNote: '' }).then(function (rec) { return logFor(rec, 'assign', '관리자 배정 · ' + proj.name + ' · ' + catLabel(cat)); }).then(function () { toast('처리 완료: ' + proj.name + ' · ' + catLabel(cat)); touchUnlock(); return refresh(); }); }).catch(handleError);
         break;
       }
       case 'reject':
-        promptDlg({ title: '반려', message: '반려 사유를 적어 주세요. 청구자에게 표시됩니다.', input: 'textarea', okLabel: '반려', danger: true }).then(function (reason) { if (reason === null) return; return store.updateRequest(id, { status: 'rejected', projectId: null, processedAt: new Date().toISOString(), processedBy: state.session.user.name, adminNote: reason.trim() }).then(function () { toast('반려했습니다.'); touchUnlock(); return refresh(); }); }).catch(handleError);
+        promptDlg({ title: '반려', message: '반려 사유를 적어 주세요. 청구자에게 표시됩니다.', input: 'textarea', okLabel: '반려', danger: true }).then(function (reason) { if (reason === null) return; return store.updateRequest(id, { status: 'rejected', projectId: null, processedAt: new Date().toISOString(), processedBy: state.session.user.name, adminNote: reason.trim() }).then(function (rec) { return logFor(rec, 'reject', reason.trim()); }).then(function () { toast('반려했습니다.'); touchUnlock(); return refresh(); }); }).catch(handleError);
         break;
-      case 'reopen': store.updateRequest(id, { status: 'pending', projectId: null, processedAt: null, processedBy: null, adminNote: '' }).then(function () { toast('미처리로 되돌렸습니다.'); touchUnlock(); return refresh(); }).catch(handleError); break;
+      case 'reopen': store.updateRequest(id, { status: 'pending', projectId: null, processedAt: null, processedBy: null, adminNote: '' }).then(function (rec) { return logFor(rec, 'reopen', '미처리로 되돌림'); }).then(function () { toast('미처리로 되돌렸습니다.'); touchUnlock(); return refresh(); }).catch(handleError); break;
       case 'delete': {
-        var target = state.requests.filter(function (x) { return x.id === id; })[0]; var ownPending = target && isMine(target) && target.status === 'pending' && !isAdminActive();
-        confirmDlg({ title: ownPending ? '청구 취소' : '청구 삭제', message: ownPending ? '이 청구를 취소할까요?' : '이 청구를 삭제할까요? 되돌릴 수 없습니다.', okLabel: ownPending ? '취소하기' : '삭제', danger: true }).then(function (ok) { if (!ok) return; return store.deleteRequest(id).then(function () { toast(ownPending ? '청구를 취소했습니다.' : '삭제했습니다.'); touchUnlock(); return refresh(); }); }).catch(handleError);
+        var ownPending = target && isMine(target) && target.status === 'pending' && !isAdminActive();
+        confirmDlg({ title: ownPending ? '청구 취소' : '청구 삭제', message: ownPending ? '이 청구를 취소할까요?' : '이 청구를 삭제할까요? 되돌릴 수 없습니다 (처리 로그에는 남습니다).', okLabel: ownPending ? '취소하기' : '삭제', danger: true }).then(function (ok) { if (!ok) return; return logFor(target, 'delete', ownPending ? '청구자 취소' : '관리자 삭제 · 상태 ' + ((STATUS[target.status] || {}).label || target.status)).then(function () { return store.deleteRequest(id); }).then(function () { toast(ownPending ? '청구를 취소했습니다.' : '삭제했습니다.'); touchUnlock(); return refresh(); }); }).catch(handleError);
         break;
       }
     }

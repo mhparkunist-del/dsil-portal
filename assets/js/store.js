@@ -139,32 +139,94 @@
   /* 빈 데이터: migrate() 가 관리자 계정(관리자 / 0000)과 공휴일 초기값만 채움 */
   function emptyData() {
     return { accounts: [], projects: [], requests: [], reviews: [], exports: [], equipment: [], reservations: [], usageLogs: [],
-      attMembers: [], attRecords: [], attLeaves: [], attHolidays: null, invManagers: [], invItems: [], invMoves: [], security: [], participationImport: null };
+      attMembers: [], attRecords: [], attLeaves: [], attHolidays: null, invManagers: [], invItems: [], invMoves: [], security: [], participationImport: null, participationRows: [], meetingLogs: [] };
   }
 
-  /* 참여과제 시트 → 과제(alias)별 참여자 목록. payload = { source, months:[...], rows:[{ name, project, months:{ '2026-09': true } }] } */
-  function applyParticipation(data, payload, by) {
-    var rows = (payload && Array.isArray(payload.rows)) ? payload.rows : [];
-    var byProject = {}, order = [];
-    rows.forEach(function (r) {
+  /* ------------------------------------------------------------------ */
+  /*  참여과제 시트 ↔ 과제 목록 동기화 (순수 함수, local/supabase 공용)          */
+  /*  rows = [{ name, project(약칭), months:{ '2026-09': true } }]           */
+  /* ------------------------------------------------------------------ */
+  var AUTO_NOTE = '참여과제 시트에서 자동 생성';
+  function normName(s) { return String(s || '').replace(/\s+/g, '').toLowerCase(); }
+  function normRows(rows) {
+    var out = [], seen = {};
+    (Array.isArray(rows) ? rows : []).forEach(function (r) {
       var alias = String(r.project || '').trim(), name = String(r.name || '').trim();
       if (!alias || !name) return;
-      if (!byProject[alias]) { byProject[alias] = []; order.push(alias); }
-      if (byProject[alias].some(function (x) { return x.name === name; })) return;
-      byProject[alias].push({ name: name, months: (r.months && typeof r.months === 'object') ? r.months : {} });
+      var k = alias + '|' + name; if (seen[k]) return; seen[k] = 1;
+      out.push({ name: name, project: alias, months: (r.months && typeof r.months === 'object') ? r.months : {} });
     });
-    var created = 0, updated = 0;
-    order.forEach(function (alias) {
-      var p = data.projects.filter(function (x) { return x.alias === alias; })[0] || data.projects.filter(function (x) { return !x.alias && x.name === alias; })[0];
-      if (!p) {
-        p = { id: uid(), code: '', name: alias, alias: alias, budgets: {}, startDate: '', endDate: '', manager: '', accountManager: '', cardUsers: [], note: '참여과제 시트에서 자동 생성', active: true, createdAt: nowISO(), participants: [] };
-        data.projects.push(p); created++;
-      } else updated++;
-      p.alias = alias; p.participants = byProject[alias];
+    return out;
+  }
+  function sheetAliases(rows) { var out = []; rows.forEach(function (r) { if (out.indexOf(r.project) < 0) out.push(r.project); }); return out; }
+  function participantsForAlias(rows, alias) { return rows.filter(function (r) { return normName(r.project) === normName(alias); }).map(function (r) { return { name: r.name, months: r.months }; }); }
+  function isPlaceholder(p) { return !!p.autoCreated || (p.note === AUTO_NOTE && !Object.keys(p.budgets || {}).some(function (k) { return Number(p.budgets[k]) > 0; })); }
+  /* 약칭에 맞는 기존 과제 찾기: 이름이 같거나, 이름이 약칭을 포함하거나 약칭이 이름을 포함(유일할 때만) */
+  function findProjectForAlias(projects, alias, excludeId) {
+    var a = normName(alias);
+    var pool = projects.filter(function (p) { return p.id !== excludeId && !p.alias && !isPlaceholder(p); });
+    var byName = pool.filter(function (p) { return normName(p.name) === a; })[0];
+    if (byName) return byName;
+    var fuzzy = pool.filter(function (p) { var n = normName(p.name); return n && a && (n.indexOf(a) >= 0 || a.indexOf(n) >= 0); });
+    return fuzzy.length === 1 ? fuzzy[0] : null;
+  }
+  function mergeProjectInto(data, fromId, intoId) {
+    if (!fromId || !intoId || fromId === intoId) return;
+    (data.requests || []).forEach(function (r) { if (r.projectId === fromId) r.projectId = intoId; if (r.meta && r.meta.suggestedProjectId === fromId) r.meta.suggestedProjectId = intoId; });
+    (data.reviews || []).forEach(function (rv) { if (rv.projectId === fromId) rv.projectId = intoId; });
+    data.projects = data.projects.filter(function (p) { return p.id !== fromId; });
+    (data.merged = data.merged || []).push({ from: fromId, into: intoId });
+  }
+  /* 과제 하나에 약칭을 붙임. 같은 약칭을 가진 자동 생성 과제가 있으면 이 과제로 병합 */
+  function linkAlias(data, projectId, alias) {
+    var p = data.projects.filter(function (x) { return x.id === projectId; })[0];
+    if (!p) throw new Error('과제를 찾을 수 없습니다.');
+    alias = String(alias || '').trim();
+    if (alias) {
+      data.projects.filter(function (x) { return x.id !== p.id && normName(x.alias) === normName(alias); }).forEach(function (holder) {
+        if (isPlaceholder(holder)) mergeProjectInto(data, holder.id, p.id); else holder.alias = '';
+      });
+      p.alias = alias; p.participants = participantsForAlias(data.participationRows || [], alias);
+    } else { p.alias = ''; p.participants = []; }
+    delete p.autoCreated;
+    return p;
+  }
+  /* 시트의 모든 약칭이 과제 하나에 연결되고, 과제 목록의 모든 과제가 약칭(없으면 자기 이름)을 갖도록 맞춤 */
+  function syncSheet(data) {
+    var rows = data.participationRows || [];
+    var res = { linked: [], created: [], aliased: [], merged: [], refreshed: 0 };
+    sheetAliases(rows).forEach(function (alias) {
+      var holders = data.projects.filter(function (p) { return normName(p.alias) === normName(alias); });
+      var real = holders.filter(function (p) { return !isPlaceholder(p); })[0];
+      var placeholder = holders.filter(function (p) { return isPlaceholder(p); })[0];
+      var target = real || null;
+      if (!target) {
+        var cand = findProjectForAlias(data.projects, alias, placeholder ? placeholder.id : null);
+        if (cand) { target = cand; target.alias = alias; res.linked.push(cand.name + ' ← ' + alias); if (placeholder) { mergeProjectInto(data, placeholder.id, cand.id); res.merged.push(alias); } }
+        else if (placeholder) target = placeholder;
+        else {
+          target = { id: uid(), code: '', name: alias, alias: alias, budgets: {}, startDate: '', endDate: '', manager: '', accountManager: '', cardUsers: [], note: AUTO_NOTE, active: true, createdAt: nowISO(), participants: [], autoCreated: true };
+          data.projects.push(target); res.created.push(alias);
+        }
+      } else if (placeholder && placeholder.id !== target.id) { mergeProjectInto(data, placeholder.id, target.id); res.merged.push(alias); }
+      target.alias = alias; target.participants = participantsForAlias(rows, alias); res.refreshed++;
     });
-    data.projects.forEach(function (p) { if (p.alias && !byProject[p.alias]) p.participants = []; });
-    data.participationImport = { source: String(payload.source || ''), months: Array.isArray(payload.months) ? payload.months.slice() : [], importedAt: nowISO(), importedBy: by || '', rows: rows.length, projects: order.length, created: created, updated: updated };
+    data.projects.forEach(function (p) {
+      if (!p.alias) { p.alias = p.name; p.participants = []; res.aliased.push(p.name); }
+      else if (!sheetAliases(rows).some(function (a) { return normName(a) === normName(p.alias); })) p.participants = [];
+    });
+    return res;
+  }
+  /* 참여과제 시트 → rows 저장 + 과제 목록 동기화. payload = { source, months:[...], rows:[...] } */
+  function applyParticipation(data, payload, by) {
+    var rows = normRows(payload && payload.rows);
+    data.participationRows = rows;
+    var res = syncSheet(data);
+    data.participationImport = { source: String(payload.source || ''), months: Array.isArray(payload.months) ? payload.months.slice() : [], importedAt: nowISO(), importedBy: by || '', rows: rows.length, projects: sheetAliases(rows).length, created: res.created.length, updated: res.refreshed - res.created.length, linked: res.linked, merged: res.merged };
     return JSON.parse(JSON.stringify(data.participationImport));
+  }
+  function meetingLogEntry(e, by) {
+    return Object.assign({ id: uid(), at: nowISO(), by: by ? by.name : '', byId: by ? by.id : '', type: '', requestId: null, requesterId: null, requesterName: '', project: '', code: '', title: '', amount: 0, count: 0, perHead: 0, attendees: '', detail: '' }, e || {});
   }
 
   /* ------------------------------------------------------------------ */
@@ -302,6 +364,8 @@
       if (!Array.isArray(p.participants)) p.participants = []; /* [{ name, months:{ '2026-09': true } }] 회의비 참석자 후보 */
     });
     if (data.participationImport === undefined) data.participationImport = null;
+    if (!Array.isArray(data.participationRows)) data.participationRows = [];
+    if (!Array.isArray(data.meetingLogs)) data.meetingLogs = [];   /* 회의비 처리 로그 (추가만, 삭제 없음) */
     (data.requests || []).forEach(function (r) {
       if (!r.category || ids.indexOf(r.category) < 0) r.category = first;
       if (r.reviewId === undefined) r.reviewId = null;
@@ -444,7 +508,7 @@
           readSession();
           /* 저장소에 담긴 참여과제 시트(assets/data/participation.js)가 새 파일이면 그대로 가져옴 */
           var P = window.DSIL_PARTICIPATION;
-          if (P && P.source && (!data.participationImport || data.participationImport.source !== P.source)) { applyParticipation(data, P, '시트 파일'); write(); }
+          if (P && P.source && (!data.participationImport || data.participationImport.source !== P.source || !data.participationRows.length)) { applyParticipation(data, P, '시트 파일'); delete data.merged; write(); }
         });
       },
 
@@ -561,10 +625,35 @@
       importParticipation: function (payload) {
         var err = needSession(); if (err) return Promise.reject(err);
         var info = applyParticipation(data, payload, session.user.name);
-        write(); emit();
+        delete data.merged; write(); emit();
         return Promise.resolve(info);
       },
       getParticipationInfo: function () { return Promise.resolve(data.participationImport ? clone(data.participationImport) : null); },
+      getParticipationRows: function () { return Promise.resolve(clone(data.participationRows || [])); },
+      /* 과제에 시트 약칭 연결(같은 약칭의 자동 생성 과제는 병합) */
+      linkProjectAlias: function (projectId, alias) {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var p = linkAlias(data, projectId, alias);
+        delete data.merged; write(); emit();
+        return Promise.resolve(clone(p));
+      },
+      /* 과제 목록 전체를 시트와 맞춤 (약칭 자동 매칭·병합·없는 과제는 자기 이름을 약칭으로) */
+      syncProjectsWithSheet: function () {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var res = syncSheet(data);
+        delete data.merged; write(); emit();
+        return Promise.resolve(res);
+      },
+
+      /* ---------- 회의비 처리 로그 (추가만 가능) ---------- */
+      addMeetingLog: function (entry) {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var rec = meetingLogEntry(entry, session.user);
+        data.meetingLogs.unshift(rec);
+        write(); emit();
+        return Promise.resolve(clone(rec));
+      },
+      listMeetingLogs: function () { return Promise.resolve(clone(data.meetingLogs || [])); },
 
       /* ---------- 구매 보고서 · 사진 ---------- */
       savePhoto: function (dataUrl) { var key = 'ph-' + uid(); return idbPut(key, dataUrl).then(function () { return key; }); },
@@ -1391,20 +1480,64 @@
         return client.from('projects').upsert(fromProject(p)).select().single().then(unwrap).then(toProject);
       },
 
-      /* 참여과제 시트: 관리자가 올리면 과제(alias)별 참여자 목록을 projects 에 저장 */
+      /* 참여과제 시트: 관리자가 올리면 app_settings 에 rows 를 두고 projects(alias, participants)를 동기화 */
       importParticipation: function (payload) {
         if (!(profile && profile.is_admin)) return Promise.reject(new Error('관리자만 참여과제 시트를 가져올 수 있습니다.'));
-        return client.from('projects').select('*').then(unwrap).then(function (rows) {
-          var tmp = { projects: rows.map(toProject) };
+        var self = this;
+        return self._loadSheetData().then(function (tmp) {
           var info = applyParticipation(tmp, payload, profile.name || profile.email || '');
-          var touched = tmp.projects.filter(function (p) { return p.alias; }).map(fromProject);
-          return (touched.length ? client.from('projects').upsert(touched).then(unwrap) : Promise.resolve()).then(function () { return info; });
+          return self._saveSheetData(tmp, { rows: tmp.participationRows, import: tmp.participationImport }).then(function () { return info; });
         });
       },
+      _loadSheetData: function () {
+        return Promise.all([client.from('projects').select('*').then(unwrap), client.from('requests').select('id, project_id, meta').then(unwrap), client.from('app_settings').select('key, value').in('key', ['participation_rows', 'participation_import']).then(unwrap)]).then(function (res) {
+          var settings = {}; res[2].forEach(function (s) { settings[s.key] = s.value; });
+          return { projects: res[0].map(toProject), requests: res[1].map(function (r) { return { id: r.id, projectId: r.project_id, meta: r.meta || {} }; }), reviews: [], participationRows: Array.isArray(settings.participation_rows) ? settings.participation_rows : [], participationImport: settings.participation_import || null, _origProjects: res[0].map(toProject) };
+        });
+      },
+      _saveSheetData: function (tmp, settings) {
+        var origIds = tmp._origProjects.map(function (p) { return p.id; });
+        var current = {}; tmp.projects.forEach(function (p) { current[p.id] = p; });
+        var upserts = tmp.projects.map(fromProject);
+        var deleted = origIds.filter(function (id) { return !current[id]; });
+        var moved = (tmp.merged || []);
+        var chain = upserts.length ? client.from('projects').upsert(upserts).then(unwrap) : Promise.resolve();
+        moved.forEach(function (m) { chain = chain.then(function () { return client.from('requests').update({ project_id: m.into }).eq('project_id', m.from).then(unwrap); }).then(function () { return client.from('reviews').update({ project_id: m.into }).eq('project_id', m.from).then(unwrap); }); });
+        if (deleted.length) chain = chain.then(function () { return client.from('projects').delete().in('id', deleted).then(unwrap); });
+        if (settings) {
+          var rows = [];
+          if (settings.rows) rows.push({ key: 'participation_rows', value: settings.rows, updated_at: new Date().toISOString() });
+          if (settings.import) rows.push({ key: 'participation_import', value: settings.import, updated_at: new Date().toISOString() });
+          if (rows.length) chain = chain.then(function () { return client.from('app_settings').upsert(rows).then(unwrap); });
+        }
+        return chain;
+      },
       getParticipationInfo: function () {
-        return client.from('projects').select('alias, participants').then(unwrap).then(function (rows) {
-          var withList = rows.filter(function (r) { return r.alias && Array.isArray(r.participants) && r.participants.length; });
-          return withList.length ? { source: '공용 DB', months: [], importedAt: null, importedBy: '', rows: withList.reduce(function (s, r) { return s + r.participants.length; }, 0), projects: withList.length } : null;
+        return client.from('app_settings').select('value').eq('key', 'participation_import').maybeSingle().then(unwrap).then(function (row) { return row ? row.value : null; }).catch(function () { return null; });
+      },
+      getParticipationRows: function () {
+        return client.from('app_settings').select('value').eq('key', 'participation_rows').maybeSingle().then(unwrap).then(function (row) { return row && Array.isArray(row.value) ? row.value : []; }).catch(function () { return []; });
+      },
+      linkProjectAlias: function (projectId, alias) {
+        if (!(profile && profile.is_admin)) return Promise.reject(new Error('관리자만 과제 연결을 바꿀 수 있습니다.'));
+        var self = this;
+        return self._loadSheetData().then(function (tmp) { var p = linkAlias(tmp, projectId, alias); return self._saveSheetData(tmp, null).then(function () { return p; }); });
+      },
+      syncProjectsWithSheet: function () {
+        if (!(profile && profile.is_admin)) return Promise.reject(new Error('관리자만 동기화할 수 있습니다.'));
+        var self = this;
+        return self._loadSheetData().then(function (tmp) { var res = syncSheet(tmp); return self._saveSheetData(tmp, null).then(function () { return res; }); });
+      },
+
+      /* 회의비 처리 로그 */
+      addMeetingLog: function (entry) {
+        var u = currentUser(); if (!u) return Promise.reject(new Error('로그인이 필요합니다.'));
+        var rec = meetingLogEntry(entry, u);
+        return client.from('meeting_logs').insert({ id: rec.id, at: rec.at, by_id: u.id, by_name: rec.by, type: rec.type, request_id: rec.requestId, requester_id: rec.requesterId, requester_name: rec.requesterName, project: rec.project, code: rec.code, title: rec.title, amount: rec.amount, count: rec.count, per_head: rec.perHead, attendees: rec.attendees, detail: rec.detail }).then(unwrap).then(function () { return rec; });
+      },
+      listMeetingLogs: function () {
+        return client.from('meeting_logs').select('*').order('at', { ascending: false }).limit(2000).then(unwrap).then(function (rows) {
+          return rows.map(function (r) { return { id: r.id, at: r.at, by: r.by_name, byId: r.by_id, type: r.type, requestId: r.request_id, requesterId: r.requester_id, requesterName: r.requester_name, project: r.project, code: r.code, title: r.title, amount: Number(r.amount) || 0, count: Number(r.count) || 0, perHead: Number(r.per_head) || 0, attendees: r.attendees || '', detail: r.detail || '' }; });
         });
       },
 

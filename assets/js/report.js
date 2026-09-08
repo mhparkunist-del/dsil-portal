@@ -500,6 +500,13 @@
     var payload = Object.assign({}, f, { status: status });
     return store.saveReport(state.id, payload).then(function () { return reload(); }).then(render);
   }
+  /* 회의비 건의 처리 로그 (회의비 페이지의 처리 로그 탭에 표시) */
+  function meetingLog(type, detail) {
+    if (!isMeeting() || !store.addMeetingLog) return Promise.resolve();
+    var r = state.request, p = state.project || {}, f = state.form || {}, m = r.meta || {};
+    var n = attendeeCount(f.attendees || m.attendees);
+    return store.addMeetingLog({ type: type, requestId: r.id, requesterId: r.requesterId, requesterName: r.requesterName, project: p.alias || p.name || '', code: f.account || p.code || '', title: f.title || m.title || r.item, amount: Number(f.amount) || r.amount, count: n, perHead: n ? Math.round((Number(f.amount) || r.amount) / n) : 0, attendees: f.attendees || m.attendees || '', detail: detail || '' }).catch(function (e) { console.error(e); });
+  }
 
   /* ---------- actions ---------- */
   function handleError(err) { console.error(err); toast(err && err.message ? err.message : String(err), true); }
@@ -551,14 +558,14 @@
       case 'submit': {
         var missing = validate(collectForm());
         if (missing.length) { toast('부족한 항목: ' + missing.join(', '), true); return; }
-        persist('submitted').then(function () { toast(isMeeting() ? '회의록을 제출했습니다. 인쇄용 또는 DOCX 로 내려받아 정산에 쓰세요.' : '보고서를 제출했습니다. 관리자 확인 후 상태가 바뀝니다.'); }).catch(handleError);
+        persist('submitted').then(function () { return meetingLog('minutes', '회의록 제출 · 영수증 ' + photoCount(state.form, 'receipt') + '장'); }).then(function () { toast(isMeeting() ? '회의록을 제출했습니다. 인쇄용 또는 DOCX 로 내려받아 정산에 쓰세요.' : '보고서를 제출했습니다. 관리자 확인 후 상태가 바뀝니다.'); }).catch(handleError);
         break;
       }
       case 'verify':
-        confirmDlg({ title: '보고서 확인', message: '첨부와 내용을 확인했고 정산 서류로 넘겨도 되는 상태인가요?', okLabel: '확인 완료' }).then(function (ok) { if (!ok) return; return store.verifyReport(state.id, true, '').then(function () { toast('확인 완료로 표시했습니다.'); return refresh(); }); }).catch(handleError);
+        confirmDlg({ title: '보고서 확인', message: '첨부와 내용을 확인했고 정산 서류로 넘겨도 되는 상태인가요?', okLabel: '확인 완료' }).then(function (ok) { if (!ok) return; return store.verifyReport(state.id, true, '').then(function () { return meetingLog('minutes-verify', '관리자 확인 완료'); }).then(function () { toast('확인 완료로 표시했습니다.'); return refresh(); }); }).catch(handleError);
         break;
       case 'return':
-        promptDlg({ title: '보완 요청', message: '작성자에게 전달할 내용을 적어 주세요. 보고서는 작성 중 상태로 돌아갑니다.', input: 'textarea', placeholder: '예: 영수증 승인 금액이 보이지 않습니다', okLabel: '보완 요청', danger: true }).then(function (note) { if (note === null) return; return store.verifyReport(state.id, false, note).then(function () { toast('작성자에게 보완을 요청했습니다.'); return refresh(); }); }).catch(handleError);
+        promptDlg({ title: '보완 요청', message: '작성자에게 전달할 내용을 적어 주세요. 보고서는 작성 중 상태로 돌아갑니다.', input: 'textarea', placeholder: '예: 영수증 승인 금액이 보이지 않습니다', okLabel: '보완 요청', danger: true }).then(function (note) { if (note === null) return; return store.verifyReport(state.id, false, note).then(function () { return meetingLog('minutes-return', String(note || '').trim()); }).then(function () { toast('작성자에게 보완을 요청했습니다.'); return refresh(); }); }).catch(handleError);
         break;
       case 'remove-photo': {
         var slot = btn.getAttribute('data-slot'), key = btn.getAttribute('data-key');

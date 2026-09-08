@@ -159,6 +159,26 @@ alter table public.projects add column if not exists card_users jsonb not null d
 alter table public.profiles add column if not exists signature_key text;                        -- 서명 이미지 (Storage 키)
 alter table public.projects add column if not exists alias text not null default '';            -- 참여과제 시트의 과제 약칭 (우수신진, 차지반 …)
 alter table public.projects add column if not exists participants jsonb not null default '[]'::jsonb; -- [{ name, months:{ '2026-09': true } }] 회의비 참석자 후보
+-- 참여과제 시트 원본 행과 가져오기 정보 (관리자만 쓰고, 로그인한 누구나 읽음)
+create table if not exists public.app_settings (key text primary key, value jsonb not null default '{}'::jsonb, updated_at timestamptz not null default now());
+alter table public.app_settings enable row level security;
+drop policy if exists "settings: read all" on public.app_settings;
+drop policy if exists "settings: admin write" on public.app_settings;
+create policy "settings: read all"    on public.app_settings for select to authenticated using (true);
+create policy "settings: admin write" on public.app_settings for all    to authenticated using (public.is_admin()) with check (public.is_admin());
+-- 회의비 처리 로그: 누구나 자기 행을 추가할 수 있고 읽기만 가능 (수정·삭제 정책 없음 = 불가)
+create table if not exists public.meeting_logs (
+  id uuid primary key default gen_random_uuid(), at timestamptz not null default now(),
+  by_id uuid references public.profiles(id), by_name text not null default '', type text not null,
+  request_id uuid, requester_id uuid, requester_name text not null default '', project text not null default '', code text not null default '',
+  title text not null default '', amount numeric not null default 0, count int not null default 0, per_head numeric not null default 0,
+  attendees text not null default '', detail text not null default ''
+);
+alter table public.meeting_logs enable row level security;
+drop policy if exists "meeting_logs: read all"   on public.meeting_logs;
+drop policy if exists "meeting_logs: insert own" on public.meeting_logs;
+create policy "meeting_logs: read all"   on public.meeting_logs for select to authenticated using (true);
+create policy "meeting_logs: insert own" on public.meeting_logs for insert to authenticated with check (public.is_active() and by_id = auth.uid());
 -- 회의비는 청구자가 참여과제 시트에 있는 과제를 골라 내면 관리자 승인 없이 바로 처리(status done)됩니다.
 drop policy if exists "requests: insert meeting auto" on public.requests;
 create policy "requests: insert meeting auto" on public.requests for insert to authenticated
