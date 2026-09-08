@@ -515,6 +515,24 @@
     function clone(x) { return JSON.parse(JSON.stringify(x)); }
     function needSession() { return session ? null : new Error('로그인이 필요합니다.'); }
 
+    /* 장비 담당자 권한: 로그인한 사람이 그 장비의 담당자로 지정돼 있어야 함 (포털 관리자는 모든 장비) */
+    function isDesignatedManager(eq) {
+      if (!session || !eq) return false;
+      if (session.isAdmin) return true;
+      return !!eq.managerName && nameKey(eq.managerName) === nameKey(session.user.name);
+    }
+    function managerDeniedMsg(eq) {
+      return '이 장비의 담당자로 지정된 계정이 아닙니다. 담당자는 ' + ((eq && eq.managerName) ? eq.managerName : '미지정') + ' 입니다. 관리자에게 담당자 변경을 요청하세요.';
+    }
+    /* managerPin === null 이면 포털 관리자 경로, 아니면 담당자 이름 + PIN 을 함께 확인 */
+    function checkManager(eq, managerPin) {
+      var err = needSession(); if (err) return Promise.reject(err);
+      if (!eq) return Promise.reject(new Error('장비를 찾을 수 없습니다.'));
+      if (managerPin === null) return Promise.resolve(!!(session && session.isAdmin));
+      if (!isDesignatedManager(eq)) return Promise.reject(new Error(managerDeniedMsg(eq)));
+      return hashPin(managerPin).then(function (h) { return h === eq.managerPinHash; });
+    }
+
     window.addEventListener('storage', function (e) {
       if (e.key === DATA_KEY) { read(); emit(); }
     });
@@ -837,6 +855,7 @@
       verifyManager: function (equipmentId, pin) {
         var eq = data.equipment.filter(function (x) { return x.id === equipmentId; })[0];
         if (!eq || !eq.managerPinHash) return Promise.resolve(false);
+        if (!isDesignatedManager(eq)) return Promise.reject(new Error(managerDeniedMsg(eq)));
         return hashPin(pin).then(function (h) { return h === eq.managerPinHash; });
       },
 
@@ -847,8 +866,7 @@
         if (!eq) return Promise.reject(new Error('장비를 찾을 수 없습니다.'));
         var nm = String(name || '').trim();
         if (!nm) return Promise.reject(new Error('이름을 입력하세요.'));
-        var check = managerPin === null ? Promise.resolve(!!(session && session.isAdmin)) : hashPin(managerPin).then(function (h) { return h === eq.managerPinHash; });
-        return check.then(function (ok) {
+        return checkManager(eq, managerPin).then(function (ok) {
           if (!ok) throw new Error(managerPin === null ? '관리자만 담당자 PIN 없이 등록할 수 있습니다.' : '장비 담당자 PIN이 올바르지 않습니다.');
           var key = nameKey(nm);
           var u = eq.users.filter(function (x) { return nameKey(x.name) === key; })[0];
@@ -863,8 +881,7 @@
       setUserGrade: function (equipmentId, managerPin, userId, grade) {
         var eq = data.equipment.filter(function (x) { return x.id === equipmentId; })[0];
         if (!eq) return Promise.reject(new Error('장비를 찾을 수 없습니다.'));
-        var check = managerPin === null ? Promise.resolve(!!(session && session.isAdmin)) : hashPin(managerPin).then(function (h) { return h === eq.managerPinHash; });
-        return check.then(function (ok) {
+        return checkManager(eq, managerPin).then(function (ok) {
           if (!ok) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
           var u = eq.users.filter(function (x) { return x.id === userId; })[0];
           if (!u) throw new Error('사용자를 찾을 수 없습니다.');
@@ -877,8 +894,7 @@
       revokeUser: function (equipmentId, managerPin, userId) {
         var eq = data.equipment.filter(function (x) { return x.id === equipmentId; })[0];
         if (!eq) return Promise.reject(new Error('장비를 찾을 수 없습니다.'));
-        var check = managerPin === null ? Promise.resolve(!!(session && session.isAdmin)) : hashPin(managerPin).then(function (h) { return h === eq.managerPinHash; });
-        return check.then(function (ok) {
+        return checkManager(eq, managerPin).then(function (ok) {
           if (!ok) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
           eq.users = eq.users.filter(function (x) { return x.id !== userId; });
           write(); emit();
@@ -928,7 +944,7 @@
         var ecfg = equipmentCfg(cfg);
         var p;
         if (me && isSameUser(r, me) && new Date(r.start) > new Date()) p = Promise.resolve(true);
-        else if (opts && opts.managerPin) { var eq = data.equipment.filter(function (x) { return x.id === r.equipmentId; })[0]; p = hashPin(opts.managerPin).then(function (h) { return !!eq && h === eq.managerPinHash; }); }
+        else if (opts && opts.managerPin) { var eq = data.equipment.filter(function (x) { return x.id === r.equipmentId; })[0]; p = checkManager(eq, opts.managerPin); }
         else p = Promise.resolve(false);
         return p.then(function (ok) {
           if (!ok) throw new Error('본인의 예정된 예약만 변경할 수 있습니다. 시작된 예약은 장비 담당자가 처리합니다.');
@@ -954,7 +970,7 @@
         if (me && isSameUser(r, me) && new Date(r.start) > new Date()) p = Promise.resolve(true);
         else if (opts && opts.managerPin) {
           var eq = data.equipment.filter(function (x) { return x.id === r.equipmentId; })[0];
-          p = hashPin(opts.managerPin).then(function (h) { return !!eq && h === eq.managerPinHash; });
+          p = checkManager(eq, opts.managerPin);
         } else p = Promise.resolve(false);
         return p.then(function (ok) {
           if (!ok) throw new Error('본인의 예정된 예약만 취소할 수 있습니다. 지난 예약은 장비 담당자가 처리합니다.');
@@ -984,8 +1000,8 @@
         if (!r || r.status !== 'booked') return Promise.reject(new Error('예약을 찾을 수 없습니다.'));
         if (r.logId) return Promise.reject(new Error('이미 로그가 있는 예약입니다.'));
         var eq = data.equipment.filter(function (x) { return x.id === r.equipmentId; })[0];
-        return hashPin(managerPin).then(function (h) {
-          if (!eq || h !== eq.managerPinHash) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
+        return checkManager(eq, managerPin).then(function (ok) {
+          if (!ok) throw new Error('장비 담당자 PIN이 올바르지 않습니다.');
           var rec = { id: uid(), createdAt: nowISO(), reservationId: r.id, equipmentId: r.equipmentId, userId: r.userId, userName: r.userName,
             usedStart: r.start, usedEnd: r.end, condition: 'normal', content: String(note || '').trim(), issues: '', waived: true, waivedBy: session ? session.user.name : '' };
           data.usageLogs.push(rec);

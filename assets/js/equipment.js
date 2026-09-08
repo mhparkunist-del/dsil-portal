@@ -48,6 +48,14 @@
   function myUser(eq) { var u = me(); return u ? ((eq.users || []).filter(function (x) { return nameKey(x.name) === nameKey(u.name); })[0] || null) : null; }
   /* 유저·슈퍼유저 등급, 또는 포털 관리자 계정 */
   function canReserve(eq) { if (state.session && state.session.isAdmin) return true; var u = myUser(eq); return !!u && (u.grade === 'user' || u.grade === 'super'); }
+  /* 장비 담당자 권한: 로그인한 사람이 그 장비의 담당자로 지정돼 있어야 함 (포털 관리자는 전체) */
+  function isDesignatedManager(eq) {
+    var u = me();
+    if (!u || !eq) return false;
+    if (state.session && state.session.isAdmin) return true;
+    return !!eq.managerName && nameKey(eq.managerName) === nameKey(u.name);
+  }
+  function myManagedEquipment() { return state.equipment.filter(isDesignatedManager); }
   function isAuthorized(eq) { return canReserve(eq); }
   function daysLeft(r) { return Math.max(0, Math.ceil((new Date(r.end).getTime() + EQ.logDueDays * 86400000 - Date.now()) / 86400000)); }
   function fmtRange(r) {
@@ -456,17 +464,34 @@
   /* ---------- 장비 담당자 탭 ---------- */
   function renderManagerTab() {
     if (!state.manager) {
-      var opts = state.equipment.map(function (e) { return '<option value="' + esc(e.id) + '">' + esc(e.name) + (e.managerName ? ' · ' + esc(e.managerName) : '') + '</option>'; }).join('');
+      /* 내가 담당자로 지정된 장비만 (포털 관리자는 전체) */
+      var mine = myManagedEquipment();
+      var u = me();
+      var opts = mine.map(function (e) { return '<option value="' + esc(e.id) + '">' + esc(e.name) + (e.managerName ? ' · ' + esc(e.managerName) : '') + (e.hasManagerPin ? '' : ' (PIN 미설정)') + '</option>'; }).join('');
       var body = '<div class="card-body"><div class="container-tight"><h3 class="card-title mb-1"><i class="ti ti-user-shield me-1 text-primary"></i>장비 담당자 확인</h3>'
-        + '<p class="text-secondary small mb-3">장비를 고르고 담당자 PIN을 입력하면 ' + EQ.managerUnlockMinutes + '분 동안 그 장비의 사용자 등록, 예약 관리, 로그 열람이 열립니다.</p>'
-        + (state.equipment.length ? '<form id="mgr-form"><div class="mb-3"><label class="form-label required">장비</label><select class="form-select" name="equipmentId" required>' + opts + '</select></div>'
+        + '<p class="text-secondary small mb-3">담당자로 지정된 장비만 열 수 있습니다. 담당자 PIN을 입력하면 ' + EQ.managerUnlockMinutes + '분 동안 그 장비의 사용자 등록, 예약 관리, 로그 열람이 열립니다.</p>';
+      if (!state.equipment.length) body += empty('device-desktop-off', '등록된 장비가 없습니다', '');
+      else if (!mine.length) {
+        body += empty('user-shield', '담당으로 지정된 장비가 없습니다', '지금 로그인한 계정(' + (u ? u.name : '') + ')은 어느 장비의 담당자로도 지정되어 있지 않습니다. 관리자에게 담당자 지정을 요청하세요.')
+          + '<div class="table-responsive"><table class="table table-sm table-vcenter"><thead><tr><th>장비</th><th class="w-1">담당자</th></tr></thead><tbody>'
+          + state.equipment.map(function (e) { return '<tr><td>' + eqBadge(e) + esc(e.name) + '</td><td class="text-nowrap">' + esc(e.managerName || '미지정') + '</td></tr>'; }).join('')
+          + '</tbody></table></div>';
+      } else {
+        body += '<form id="mgr-form"><div class="mb-3"><label class="form-label required">장비</label><select class="form-select" name="equipmentId" required>' + opts + '</select></div>'
           + '<div class="mb-3"><label class="form-label required">담당자 PIN</label><input type="password" class="form-control" name="pin" required inputmode="numeric" autocomplete="off"></div>'
-          + '<button type="submit" class="btn btn-primary w-100"><i class="ti ti-key me-1"></i>열기</button></form>' : empty('device-desktop-off', '등록된 장비가 없습니다', ''))
-        + '</div></div>';
+          + '<button type="submit" class="btn btn-primary w-100"><i class="ti ti-key me-1"></i>열기</button></form>'
+          + '<div class="text-secondary small mt-3"><i class="ti ti-id me-1"></i>' + esc(u ? u.name : '') + ' 님이 담당하는 장비 ' + mine.length + '대' + (isAdminEligible() ? ' (관리자 계정이라 전체가 보입니다)' : '') + '</div>';
+      }
+      body += '</div></div>';
       return { body: body };
     }
     var eq = eqById(state.manager.equipmentId);
     if (!eq) { setManager(null); return { body: '<div class="card-body">' + empty('device-desktop-off', '장비를 찾을 수 없습니다', '') + '</div>' }; }
+    /* 담당자가 바뀌었으면 열려 있던 담당자 모드를 닫음 */
+    if (!isDesignatedManager(eq)) {
+      setManager(null);
+      return { body: '<div class="card-body">' + empty('user-shield', '담당자 권한이 없습니다', esc(eq.name) + ' 의 담당자는 ' + esc(eq.managerName || '미지정') + ' 입니다. 담당자 모드를 닫았습니다.') + '</div>' };
+    }
     var now = new Date();
     var resList = state.reservations.filter(function (r) { return r.equipmentId === eq.id; });
     var logs = state.logs.filter(function (l) { return l.equipmentId === eq.id; }).sort(function (a, b) { return String(b.createdAt).localeCompare(String(a.createdAt)); });

@@ -463,9 +463,15 @@ select id, equipment_id, name, grade, granted_at, granted_by from public.equipme
 alter view public.equipment_users_public set (security_invoker = false);
 grant select on public.equipment_users_public to authenticated;
 
+-- 담당자 확인: PIN 이 맞고, 로그인한 사람이 그 장비의 담당자로 지정돼 있어야 함 (포털 관리자는 예외)
 create or replace function public.verify_equipment_manager(p_equipment_id uuid, p_pin text)
 returns boolean language sql stable security definer set search_path = public as $$
-  select exists (select 1 from public.equipment e where e.id = p_equipment_id and e.manager_pin_hash <> '' and e.manager_pin_hash = encode(digest(coalesce(p_pin, ''), 'sha256'), 'hex'));
+  select exists (
+    select 1 from public.equipment e join public.profiles me on me.id = auth.uid()
+    where e.id = p_equipment_id
+      and e.manager_pin_hash <> '' and e.manager_pin_hash = encode(digest(coalesce(p_pin, ''), 'sha256'), 'hex')
+      and (me.is_admin or public.name_key(e.manager_name) = public.name_key(me.name))
+  );
 $$;
 
 drop function if exists public.grant_equipment_user(uuid, text, text, text);
