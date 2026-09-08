@@ -65,6 +65,12 @@ window.DSIL_CONFIG = {
     }
   },
 
+  /* 회의비: 참여과제 시트(assets/data/participation.js)에 있는 과제·참여자만 배정. 청구 즉시 과제에 처리되고 회의록 작성으로 넘어감 */
+  meeting: {
+    perPersonMax: 30000,      /* 1인당 회의비 상한(원). 금액 ÷ 인원이 이 값을 넘으면 제출 불가, 자동 추가로 인원을 채움 */
+    autoProcessedBy: '자동 배정 (참여과제)'
+  },
+
   /* 구매 보고서 (구매 후 증빙 양식) */
   report: {
     inspectionThreshold: 500000,     /* 이 금액 초과: 검수 필요 → 자체 검수 물품 사진 첨부 */

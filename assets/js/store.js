@@ -139,7 +139,32 @@
   /* 빈 데이터: migrate() 가 관리자 계정(관리자 / 0000)과 공휴일 초기값만 채움 */
   function emptyData() {
     return { accounts: [], projects: [], requests: [], reviews: [], exports: [], equipment: [], reservations: [], usageLogs: [],
-      attMembers: [], attRecords: [], attLeaves: [], attHolidays: null, invManagers: [], invItems: [], invMoves: [], security: [] };
+      attMembers: [], attRecords: [], attLeaves: [], attHolidays: null, invManagers: [], invItems: [], invMoves: [], security: [], participationImport: null };
+  }
+
+  /* 참여과제 시트 → 과제(alias)별 참여자 목록. payload = { source, months:[...], rows:[{ name, project, months:{ '2026-09': true } }] } */
+  function applyParticipation(data, payload, by) {
+    var rows = (payload && Array.isArray(payload.rows)) ? payload.rows : [];
+    var byProject = {}, order = [];
+    rows.forEach(function (r) {
+      var alias = String(r.project || '').trim(), name = String(r.name || '').trim();
+      if (!alias || !name) return;
+      if (!byProject[alias]) { byProject[alias] = []; order.push(alias); }
+      if (byProject[alias].some(function (x) { return x.name === name; })) return;
+      byProject[alias].push({ name: name, months: (r.months && typeof r.months === 'object') ? r.months : {} });
+    });
+    var created = 0, updated = 0;
+    order.forEach(function (alias) {
+      var p = data.projects.filter(function (x) { return x.alias === alias; })[0] || data.projects.filter(function (x) { return !x.alias && x.name === alias; })[0];
+      if (!p) {
+        p = { id: uid(), code: '', name: alias, alias: alias, budgets: {}, startDate: '', endDate: '', manager: '', accountManager: '', cardUsers: [], note: '참여과제 시트에서 자동 생성', active: true, createdAt: nowISO(), participants: [] };
+        data.projects.push(p); created++;
+      } else updated++;
+      p.alias = alias; p.participants = byProject[alias];
+    });
+    data.projects.forEach(function (p) { if (p.alias && !byProject[p.alias]) p.participants = []; });
+    data.participationImport = { source: String(payload.source || ''), months: Array.isArray(payload.months) ? payload.months.slice() : [], importedAt: nowISO(), importedBy: by || '', rows: rows.length, projects: order.length, created: created, updated: updated };
+    return JSON.parse(JSON.stringify(data.participationImport));
   }
 
   /* ------------------------------------------------------------------ */
@@ -273,7 +298,10 @@
       delete p.budget;
       if (p.accountManager === undefined) p.accountManager = '';
       if (!Array.isArray(p.cardUsers)) p.cardUsers = [];   /* 카드 실사용자(참여연구원) 목록 */
+      if (p.alias === undefined) p.alias = '';               /* 참여과제 시트의 과제 약칭 */
+      if (!Array.isArray(p.participants)) p.participants = []; /* [{ name, months:{ '2026-09': true } }] 회의비 참석자 후보 */
     });
+    if (data.participationImport === undefined) data.participationImport = null;
     (data.requests || []).forEach(function (r) {
       if (!r.category || ids.indexOf(r.category) < 0) r.category = first;
       if (r.reviewId === undefined) r.reviewId = null;
@@ -410,7 +438,15 @@
     return {
       mode: 'local',
 
-      init: function () { read(); return ensureSeedHashes().then(function () { readSession(); }); },
+      init: function () {
+        read();
+        return ensureSeedHashes().then(function () {
+          readSession();
+          /* 저장소에 담긴 참여과제 시트(assets/data/participation.js)가 새 파일이면 그대로 가져옴 */
+          var P = window.DSIL_PARTICIPATION;
+          if (P && P.source && (!data.participationImport || data.participationImport.source !== P.source)) { applyParticipation(data, P, '시트 파일'); write(); }
+        });
+      },
 
       getSession: function () { return session ? clone(session) : null; },
 
@@ -520,6 +556,15 @@
         write(); emit();
         return Promise.resolve(clone(rec));
       },
+
+      /* ---------- 참여과제 시트 ---------- */
+      importParticipation: function (payload) {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var info = applyParticipation(data, payload, session.user.name);
+        write(); emit();
+        return Promise.resolve(info);
+      },
+      getParticipationInfo: function () { return Promise.resolve(data.participationImport ? clone(data.participationImport) : null); },
 
       /* ---------- 구매 보고서 · 사진 ---------- */
       savePhoto: function (dataUrl) { var key = 'ph-' + uid(); return idbPut(key, dataUrl).then(function () { return key; }); },
@@ -1135,6 +1180,7 @@
       budgets: (row.budgets && typeof row.budgets === 'object') ? row.budgets : {},
       startDate: row.start_date || '', endDate: row.end_date || '', manager: row.manager || '',
       accountManager: row.account_manager || '', cardUsers: Array.isArray(row.card_users) ? row.card_users : [],
+      alias: row.alias || '', participants: Array.isArray(row.participants) ? row.participants : [],
       note: row.note || '', active: row.active !== false, createdAt: row.created_at
     };
   }
@@ -1146,6 +1192,7 @@
       code: p.code || '', name: p.name, budgets: budgets,
       start_date: p.startDate || null, end_date: p.endDate || null, manager: p.manager || '',
       account_manager: p.accountManager || '', card_users: Array.isArray(p.cardUsers) ? p.cardUsers : [],
+      alias: p.alias || '', participants: Array.isArray(p.participants) ? p.participants : [],
       note: p.note || '', active: p.active !== false
     };
     if (p.id) out.id = p.id;
@@ -1342,6 +1389,23 @@
 
       saveProject: function (p) {
         return client.from('projects').upsert(fromProject(p)).select().single().then(unwrap).then(toProject);
+      },
+
+      /* 참여과제 시트: 관리자가 올리면 과제(alias)별 참여자 목록을 projects 에 저장 */
+      importParticipation: function (payload) {
+        if (!(profile && profile.is_admin)) return Promise.reject(new Error('관리자만 참여과제 시트를 가져올 수 있습니다.'));
+        return client.from('projects').select('*').then(unwrap).then(function (rows) {
+          var tmp = { projects: rows.map(toProject) };
+          var info = applyParticipation(tmp, payload, profile.name || profile.email || '');
+          var touched = tmp.projects.filter(function (p) { return p.alias; }).map(fromProject);
+          return (touched.length ? client.from('projects').upsert(touched).then(unwrap) : Promise.resolve()).then(function () { return info; });
+        });
+      },
+      getParticipationInfo: function () {
+        return client.from('projects').select('alias, participants').then(unwrap).then(function (rows) {
+          var withList = rows.filter(function (r) { return r.alias && Array.isArray(r.participants) && r.participants.length; });
+          return withList.length ? { source: '공용 DB', months: [], importedAt: null, importedBy: '', rows: withList.reduce(function (s, r) { return s + r.participants.length; }, 0), projects: withList.length } : null;
+        });
       },
 
       /* 구매 보고서 · 사진 (Supabase Storage 버킷 'report-photos', public) */

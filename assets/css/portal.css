@@ -78,6 +78,12 @@ html { color-scheme: light; }
 .rp-table .rp-muted { color: #666; font-size: 9pt; }
 .rp-table .sig { display: block; margin: 2px auto 0; max-height: 12mm; max-width: 30mm; }
 .rp-foot { color: #777; font-size: 8.5pt; }
+/* 회의록 양식 */
+.rp-title { text-align: center; font-size: 20pt; font-weight: 700; letter-spacing: 0.6em; text-indent: 0.6em; margin: 0 0 8mm; }
+.rp-minutes th { width: 24%; }
+.rp-minutes td { text-align: left; }
+.rp-star { font-weight: 700; margin: 6mm 0 3mm; }
+.rp-chip { display: inline-flex; align-items: center; gap: .35rem; }
 .rp-photo .rp-photo-wrap { height: 252mm; display: flex; align-items: center; justify-content: center; }
 .rp-photo img { width: 100%; height: 100%; object-fit: contain; }
 body.print-mode .page-body { background: #e9ecef; }

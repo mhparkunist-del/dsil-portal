@@ -157,6 +157,14 @@ alter table public.requests add column if not exists report jsonb;              
 alter table public.projects add column if not exists account_manager text not null default '';  -- 계정책임자
 alter table public.projects add column if not exists card_users jsonb not null default '[]'::jsonb; -- 카드 실사용자(참여연구원) 이름 목록
 alter table public.profiles add column if not exists signature_key text;                        -- 서명 이미지 (Storage 키)
+alter table public.projects add column if not exists alias text not null default '';            -- 참여과제 시트의 과제 약칭 (우수신진, 차지반 …)
+alter table public.projects add column if not exists participants jsonb not null default '[]'::jsonb; -- [{ name, months:{ '2026-09': true } }] 회의비 참석자 후보
+-- 회의비는 청구자가 참여과제 시트에 있는 과제를 골라 내면 관리자 승인 없이 바로 처리(status done)됩니다.
+drop policy if exists "requests: insert meeting auto" on public.requests;
+create policy "requests: insert meeting auto" on public.requests for insert to authenticated
+  with check (public.is_active() and requester_id = auth.uid() and kind = 'meeting' and status = 'done' and project_id is not null
+              and exists (select 1 from public.projects p, public.profiles me where p.id = project_id and me.id = auth.uid()
+                          and p.participants @> jsonb_build_array(jsonb_build_object('name', me.name))));
 -- 사진 저장: Storage 에 public 버킷 'report-photos' 를 만들고 authenticated 에게 insert/select/delete 를 허용하세요.
 -- 보고서 작성자는 requests 를 update 할 수 있어야 하므로 아래 정책을 추가합니다 (본인 요청의 report 열만 바꾸는 용도).
 drop policy if exists "requests: update own report" on public.requests;
@@ -290,7 +298,7 @@ create policy "projects: admin write" on public.projects for all    to authentic
 
 drop view if exists public.projects_public;
 create view public.projects_public as
-select id, code, name, start_date, end_date, manager, active, created_at
+select id, code, name, start_date, end_date, manager, active, created_at, alias, participants
 from public.projects;
 alter view public.projects_public set (security_invoker = false);
 grant select on public.projects_public to authenticated;

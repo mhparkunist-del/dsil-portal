@@ -895,6 +895,8 @@
       + '<div class="col-12"><label class="form-label required">과제명</label><input type="text" class="form-control" name="name" required value="' + esc(editing ? editing.name : '') + '" placeholder="과제명"></div>'
       + '<div class="col-6"><label class="form-label">과제번호 <span class="form-label-description">보고서 계정란</span></label><input type="text" class="form-control" name="code" value="' + esc(editing ? editing.code : '') + '" placeholder="G04260010(00)"></div>'
       + '<div class="col-6"><label class="form-label">연구책임자</label><input type="text" class="form-control" name="manager" value="' + esc(editing ? editing.manager : '') + '" placeholder="김교수"></div>'
+      + '<div class="col-6"><label class="form-label">약칭 <span class="form-label-description">참여과제 시트의 과제 이름</span></label><input type="text" class="form-control" name="alias" value="' + esc(editing ? (editing.alias || '') : '') + '" placeholder="우수신진"></div>'
+      + '<div class="col-6"><label class="form-label">참여자 <span class="form-label-description">회의비 참석자 후보 · 시트에서 가져옴</span></label><div class="form-control-plaintext small text-secondary">' + (editing && editing.participants && editing.participants.length ? esc(editing.participants.map(function (x) { return x.name; }).join(', ')) : '없음 (회의비 페이지 관리자 탭에서 시트 가져오기)') + '</div></div>'
       + '<div class="col-6"><label class="form-label">계정책임자 <span class="form-label-description">보고서 기본값</span></label><input type="text" class="form-control" name="accountManager" value="' + esc(editing ? (editing.accountManager || '') : (CFG.report && CFG.report.defaultAccountManager || '')) + '" placeholder="권지민"></div>'
       + '<div class="col-6"><label class="form-label">카드 실사용자 목록 <span class="form-label-description">참여연구원, 쉼표 구분</span></label><input type="text" class="form-control" name="cardUsers" value="' + esc(editing && editing.cardUsers ? editing.cardUsers.join(', ') : '') + '" placeholder="박민호, 위동진"></div>'
       + '<div class="col-6"><label class="form-label">시작일</label><input type="date" class="form-control" name="startDate" value="' + esc(editing ? editing.startDate : '') + '"></div>'
@@ -1322,7 +1324,7 @@
       var budgets = {};
       CAT_IDS.forEach(function (c) { budgets[c] = Math.max(0, Math.round(Number(p['budget_' + c]) || 0)); });
       var rec = { code: p.code.trim(), name: p.name.trim(), budgets: budgets, startDate: p.startDate, endDate: p.endDate, manager: p.manager.trim(), note: p.note.trim(), active: !!p.active,
-        accountManager: (p.accountManager || '').trim(), cardUsers: String(p.cardUsers || '').split(/[,\n、]/).map(function (s) { return s.trim(); }).filter(Boolean) };
+        alias: (p.alias || '').trim(), accountManager: (p.accountManager || '').trim(), cardUsers: String(p.cardUsers || '').split(/[,\n、]/).map(function (s) { return s.trim(); }).filter(Boolean) };
       if (id) rec.id = id;
       store.saveProject(rec).then(function () { toast(id ? '과제를 수정했습니다.' : '과제를 추가했습니다.'); state.editingProjectId = null; touchUnlock(); return refresh(); }).catch(handleError);
     }
