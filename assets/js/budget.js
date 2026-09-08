@@ -12,7 +12,7 @@
   var PIN_RE = new RegExp('^' + (CFG.reviewPinPattern || '\\d{4,8}') + '$');
   var store = window.DSILStore.create(CFG);
   var UNLOCK_KEY = 'dsil-budget-admin-unlock';
-  var TABS = ['requests', 'query', 'review', 'admin'];
+  var TABS = ['requests', 'query', 'review', 'budget', 'admin'];
 
   var STATUS = {
     pending: { label: '미처리', cls: 'bg-yellow-lt' },
@@ -184,6 +184,19 @@
   function isAdminActive() { return isAdminEligible() && state.adminUnlocked; }
   function touchUnlock() { if (state.adminUnlocked) setUnlock(true); }
 
+  /* ---------- 과제 담당자: 관리자가 아니어도 본인 담당 과제의 예산을 봄 ---------- */
+  function nameKey(s) { return String(s || '').replace(/\s+/g, '').toLowerCase(); }
+  function isProjectOwner(p) {
+    if (!state.session || !p || !Array.isArray(p.owners)) return false;
+    var me = nameKey(state.session.user.name);
+    return p.owners.some(function (n) { return nameKey(n) === me; });
+  }
+  function ownedProjects() { return state.projects.filter(isProjectOwner); }
+  function isOwnerAnywhere() { return ownedProjects().length > 0; }
+  /* 예산 화면에 보여줄 과제: 관리자는 전체, 담당자는 본인 과제만 */
+  function visibleBudgetProjects() { return isAdminActive() ? state.projects.slice() : ownedProjects(); }
+  function canSeeBudgets() { return isAdminActive() || isOwnerAnywhere(); }
+
   function enterAdmin(target) {
     target = target || 'admin';
     if (!isAdminEligible()) { toast('관리자 권한이 없습니다.', true); return; }
@@ -323,7 +336,7 @@
       state.reviews = res[2].slice().sort(byNewest);
       state.exports = res[3].slice().sort(byNewest);
       state.reviewsFull = full;
-      if (state.tab === 'budget') state.tab = 'admin';
+      /* 볼 수 없는 탭만 되돌림 (예산 탭은 과제 담당자도 볼 수 있으므로 render 에서 판단) */
       if (state.tab === 'admin' && !isAdminActive()) state.tab = 'requests';
     });
   }
@@ -353,28 +366,39 @@
         + stat('잔여 예산', won(sum.totalRemain), sum.totalBudget > 0 ? '사용률 ' + Math.round((sum.totalActual + sum.totalProvisional) / sum.totalBudget * 100) + '% (실+가)' : '', '', 'col-6 col-lg-3')
         + '</div>';
     } else {
+      var owned = ownedProjects();
+      var oStat = owned.reduce(function (acc, p) { var s = projectStats(p); acc.total += s.total; acc.actual += s.actual; acc.prov += s.provisional; acc.remain += s.remain; return acc; }, { total: 0, actual: 0, prov: 0, remain: 0 });
       html = '<div class="row row-deck row-cards mb-3">'
-        + stat('내 미처리 요청', sum.my.pending + '건', won(sum.my.pendingAmount) + ' 대기 중', 'text-yellow', 'col-12 col-md-4')
-        + stat('내 처리 완료', sum.my.done + '건', won(sum.my.doneAmount) + ' 집행' + (sum.my.rejected ? ' · 반려 ' + sum.my.rejected + '건' : ''), 'text-primary', 'col-6 col-md-4')
-        + stat('내 구매 심의', (sum.my.rvPending + sum.my.rvApproved + sum.my.rvRejected) + '건', '심의 중 ' + sum.my.rvPending + ' · 승인 ' + sum.my.rvApproved + ' · 반려 ' + sum.my.rvRejected, '', 'col-6 col-md-4')
+        + stat('내 미처리 요청', sum.my.pending + '건', won(sum.my.pendingAmount) + ' 대기 중', 'text-yellow', owned.length ? 'col-6 col-md-3' : 'col-12 col-md-4')
+        + stat('내 처리 완료', sum.my.done + '건', won(sum.my.doneAmount) + ' 집행' + (sum.my.rejected ? ' · 반려 ' + sum.my.rejected + '건' : ''), 'text-primary', owned.length ? 'col-6 col-md-3' : 'col-6 col-md-4')
+        + stat('내 구매 심의', (sum.my.rvPending + sum.my.rvApproved + sum.my.rvRejected) + '건', '심의 중 ' + sum.my.rvPending + ' · 승인 ' + sum.my.rvApproved + ' · 반려 ' + sum.my.rvRejected, '', owned.length ? 'col-6 col-md-3' : 'col-6 col-md-4')
+        + (owned.length ? stat('내 담당 과제 잔액', won(oStat.remain), owned.length + '개 과제 · 예산 ' + won(oStat.total) + ' · 실집행 ' + won(oStat.actual), 'text-green', 'col-6 col-md-3') : '')
         + '</div>';
     }
 
-    if (state.tab === 'budget') state.tab = 'admin';
-    var tab = state.tab === 'query' ? renderQueryTab()
-      : state.tab === 'review' ? renderReviewTab()
-      : state.tab === 'admin' ? renderAdminTab()
+    /* 과제 예산 탭: 관리자는 관리자 탭에 통합돼 있고, 담당자는 이 탭에서 본인 과제만 봅니다.
+       (state.tab 은 그대로 두고 화면에 그릴 탭만 계산 — 데이터 로드 전에 호출돼도 요청한 탭을 잃지 않게) */
+    var view = state.tab;
+    if (view === 'budget' && isAdminActive()) view = 'admin';
+    if (view === 'budget' && !canSeeBudgets()) view = 'requests';
+    if (view === 'admin' && !isAdminEligible()) view = 'requests';
+    state.view = view;
+    var tab = view === 'query' ? renderQueryTab()
+      : view === 'review' ? renderReviewTab()
+      : view === 'budget' ? renderBudgetTab()
+      : view === 'admin' ? renderAdminTab()
       : renderRequestsTab();
 
     html += '<div class="card mb-3"><div class="card-header"><ul class="nav nav-tabs card-header-tabs" role="tablist">'
       + tabLink('requests', 'cart-plus', '구매 요청')
       + tabLink('query', 'list-search', '요청 조회')
       + tabLink('review', 'shield-check', '구매 심의', sum.my.rvPending && !isAdminActive() ? '<span class="badge bg-yellow-lt ms-2">' + sum.my.rvPending + '</span>' : '')
+      + (!isAdminActive() && isOwnerAnywhere() ? tabLink('budget', 'wallet', '내 과제 예산', '<span class="badge bg-green-lt ms-2">' + ownedProjects().length + '</span>') : '')
       + (isAdminEligible() ? tabLink('admin', state.adminUnlocked ? 'lock-open' : 'lock', '관리자 · 과제 예산', (sum.pendingCount + sum.reviewPending) && state.adminUnlocked ? '<span class="badge bg-yellow-lt ms-2">' + (sum.pendingCount + sum.reviewPending) + '</span>' : '') : '')
       + '</ul></div>' + tab.body + '</div>' + (tab.after || '');
 
     app.innerHTML = html;
-    try { history.replaceState(null, '', '#' + state.tab); } catch (e) { /* 샌드박스 뷰어에서는 막힐 수 있음 */ }
+    try { history.replaceState(null, '', '#' + view); } catch (e) { /* 샌드박스 뷰어에서는 막힐 수 있음 */ }
   }
 
   function stat(label, value, sub, cls, col) {
@@ -385,7 +409,7 @@
   }
 
   function tabLink(id, icon, label, extra) {
-    return '<li class="nav-item"><a href="#' + id + '" class="nav-link' + (state.tab === id ? ' active' : '') + '" data-action="tab" data-tab="' + id + '" role="tab">'
+    return '<li class="nav-item"><a href="#' + id + '" class="nav-link' + ((state.view || state.tab) === id ? ' active' : '') + '" data-action="tab" data-tab="' + id + '" role="tab">'
       + '<i class="ti ti-' + icon + ' me-1"></i>' + esc(label) + (extra || '') + '</a></li>';
   }
 
@@ -786,15 +810,18 @@
   }
 
   function renderBudgetTab() {
-    if (!isAdminActive()) {
-      return { body: '<div class="card-body">' + empty('lock', '과제 예산은 관리자만 볼 수 있습니다', '관리자 PIN을 입력하면 ' + unlockMinutes() + '분 동안 열립니다.')
-        + '<div class="text-center"><button type="button" class="btn btn-primary" data-action="unlock-budget"><i class="ti ti-key me-1"></i>PIN 입력</button></div></div>' };
+    var admin = isAdminActive();
+    if (!admin && !isOwnerAnywhere()) {
+      return { body: '<div class="card-body">' + empty('lock', '과제 예산은 관리자와 과제 담당자만 볼 수 있습니다', '담당 과제로 지정되면 여기에서 그 과제 예산을 볼 수 있습니다. 관리자는 PIN을 입력하면 ' + unlockMinutes() + '분 동안 전체가 열립니다.')
+        + (isAdminEligible() ? '<div class="text-center"><button type="button" class="btn btn-primary" data-action="unlock-budget"><i class="ti ti-key me-1"></i>PIN 입력</button></div>' : '') + '</div>' };
     }
-    if (!state.projects.length) return { body: '<div class="card-body">' + empty('folder-off', '등록된 과제가 없습니다', '관리자 탭에서 과제를 추가하세요.') + '</div>' };
+    var list = visibleBudgetProjects();
+    if (!list.length) return { body: '<div class="card-body">' + empty('folder-off', admin ? '등록된 과제가 없습니다' : '담당으로 지정된 과제가 없습니다', admin ? '관리자 탭에서 과제를 추가하세요.' : '관리자에게 과제 담당자 지정을 요청하세요.') + '</div>' };
     var legend = '<div class="card-body py-2 border-bottom small text-secondary d-flex flex-wrap gap-3 align-items-center">'
+      + (admin ? '' : '<span class="badge bg-blue-lt">내 담당 과제 ' + list.length + '개</span>')
       + '<span><span class="badge bg-primary me-1">&nbsp;</span>실집행 (처리된 구매건)</span><span><span class="badge bg-primary opacity-50 me-1">&nbsp;</span>가할당 (승인된 심의의 미집행분)</span><span>잔액 = 예산 − 실집행 − 가할당</span></div>';
     var cards = '';
-    state.projects.slice().sort(function (a, b) { return (a.active === false) - (b.active === false); }).forEach(function (p) {
+    list.sort(function (a, b) { return (a.active === false) - (b.active === false); }).forEach(function (p) {
       var s = projectStats(p);
       var items = state.requests.filter(function (r) { return r.status === 'done' && r.projectId === p.id; });
       var rvs = state.reviews.filter(function (rv) { return rv.status === 'approved' && rv.projectId === p.id && reviewProvisional(rv) > 0; });
@@ -811,8 +838,10 @@
         + '<div class="card-status-top ' + (p.active === false ? 'bg-secondary' : barClass(s.ratio)) + '"></div>'
         + '<div class="card-body">'
         + '<div class="d-flex justify-content-between align-items-start gap-2 mb-3"><div><h3 class="card-title mb-1">' + esc(p.name) + '</h3>'
-        + '<div class="text-secondary small">' + esc(p.code) + (p.manager ? ' · ' + esc(p.manager) : '') + '<br>' + esc(p.startDate || '-') + ' ~ ' + esc(p.endDate || '-') + '</div></div>'
-        + (p.active === false ? '<span class="badge bg-secondary-lt">종료</span>' : '<span class="badge bg-blue-lt">진행</span>') + '</div>'
+        + '<div class="text-secondary small">' + esc(p.code) + (p.manager ? ' · ' + esc(p.manager) : '') + '<br>' + esc(p.startDate || '-') + ' ~ ' + esc(p.endDate || '-')
+        + (p.owners && p.owners.length ? '<br><i class="ti ti-user-star me-1"></i>담당 ' + esc(p.owners.join(', ')) : '') + '</div></div>'
+        + '<div class="text-end">' + (p.active === false ? '<span class="badge bg-secondary-lt">종료</span>' : '<span class="badge bg-blue-lt">진행</span>')
+        + (isProjectOwner(p) ? '<div class="mt-1"><span class="badge bg-green-lt">내 담당</span></div>' : '') + '</div></div>'
         + '<div class="d-flex justify-content-between align-items-baseline mb-1"><span class="text-secondary small">총 예산 <span class="tnum">' + won(s.total) + '</span></span>'
         + '<span class="tnum' + (s.remain < 0 ? ' text-danger' : '') + '">잔액 <strong>' + won(s.remain) + '</strong></span></div>'
         + stackedBar(s.actualRatio, s.ratio - s.actualRatio, s.ratio)
@@ -897,6 +926,7 @@
       + '<div class="col-6"><label class="form-label">연구책임자</label><input type="text" class="form-control" name="manager" value="' + esc(editing ? editing.manager : '') + '" placeholder="김교수"></div>'
       + '<div class="col-6"><label class="form-label">약칭 <span class="form-label-description">참여과제 시트의 과제 이름</span></label><input type="text" class="form-control" name="alias" value="' + esc(editing ? (editing.alias || '') : '') + '" placeholder="우수신진"></div>'
       + '<div class="col-6"><label class="form-label">참여자 <span class="form-label-description">회의비 참석자 후보 · 시트에서 가져옴</span></label><div class="form-control-plaintext small text-secondary">' + (editing && editing.participants && editing.participants.length ? esc(editing.participants.map(function (x) { return x.name; }).join(', ')) : '없음 (회의비 페이지 관리자 탭에서 시트 가져오기)') + '</div></div>'
+      + '<div class="col-12"><label class="form-label">과제 담당자 <span class="form-label-description">쉼표 구분 · 관리자가 아니어도 이 과제 예산을 봅니다</span></label><input type="text" class="form-control" name="owners" value="' + esc(editing && editing.owners ? editing.owners.join(', ') : '') + '" placeholder="예: 백승훈, 이현진"></div>'
       + '<div class="col-6"><label class="form-label">계정책임자 <span class="form-label-description">보고서 기본값</span></label><input type="text" class="form-control" name="accountManager" value="' + esc(editing ? (editing.accountManager || '') : (CFG.report && CFG.report.defaultAccountManager || '')) + '" placeholder="권지민"></div>'
       + '<div class="col-6"><label class="form-label">카드 실사용자 목록 <span class="form-label-description">참여연구원, 쉼표 구분</span></label><input type="text" class="form-control" name="cardUsers" value="' + esc(editing && editing.cardUsers ? editing.cardUsers.join(', ') : '') + '" placeholder="박민호, 위동진"></div>'
       + '<div class="col-6"><label class="form-label">시작일</label><input type="date" class="form-control" name="startDate" value="' + esc(editing ? editing.startDate : '') + '"></div>'
@@ -919,7 +949,8 @@
           return esc(c.label) + ' <span class="tnum">' + nf.format(budgetOf(p, c.id)) + '</span>';
         }).join(' · ');
         after += '<tr data-id="' + esc(p.id) + '"><td><div class="fw-medium">' + esc(p.name) + '</div>'
-          + '<div class="small text-secondary">' + esc(p.code) + (p.active === false ? ' · 종료' : '') + (catLine ? ' · ' + catLine : '') + '</div></td>'
+          + '<div class="small text-secondary">' + esc(p.code) + (p.active === false ? ' · 종료' : '') + (catLine ? ' · ' + catLine : '') + '</div>'
+          + (p.owners && p.owners.length ? '<div class="small"><span class="badge bg-green-lt"><i class="ti ti-user-star me-1"></i>담당 ' + esc(p.owners.join(', ')) + '</span></div>' : '<div class="small text-secondary">담당자 미지정</div>') + '</td>'
           + '<td class="text-end tnum text-nowrap">' + won(s.total) + '</td>'
           + '<td class="text-end tnum text-nowrap">' + won(s.actual) + '<div class="small text-secondary">가 ' + won(s.provisional) + '</div></td>'
           + '<td class="text-end tnum text-nowrap' + (s.remain < 0 ? ' text-danger' : '') + '">' + won(s.remain) + '</td>'
@@ -1324,7 +1355,9 @@
       var budgets = {};
       CAT_IDS.forEach(function (c) { budgets[c] = Math.max(0, Math.round(Number(p['budget_' + c]) || 0)); });
       var rec = { code: p.code.trim(), name: p.name.trim(), budgets: budgets, startDate: p.startDate, endDate: p.endDate, manager: p.manager.trim(), note: p.note.trim(), active: !!p.active,
-        alias: (p.alias || '').trim(), accountManager: (p.accountManager || '').trim(), cardUsers: String(p.cardUsers || '').split(/[,\n、]/).map(function (s) { return s.trim(); }).filter(Boolean) };
+        alias: (p.alias || '').trim(), accountManager: (p.accountManager || '').trim(),
+        owners: String(p.owners || '').split(/[,\n、]/).map(function (s) { return s.trim(); }).filter(Boolean),
+        cardUsers: String(p.cardUsers || '').split(/[,\n、]/).map(function (s) { return s.trim(); }).filter(Boolean) };
       if (id) rec.id = id;
       store.saveProject(rec).then(function () { toast(id ? '과제를 수정했습니다.' : '과제를 추가했습니다.'); state.editingProjectId = null; touchUnlock(); return refresh(); }).catch(handleError);
     }
@@ -1398,7 +1431,7 @@
       case 'tab': {
         e.preventDefault();
         var t = btn.getAttribute('data-tab');
-        if (t === 'budget') t = 'admin';
+        if (t === 'budget' && isAdminEligible() && !isOwnerAnywhere()) t = 'admin';  /* 담당 과제가 없는 관리자는 관리자 탭으로 */
         if (t === 'admin' && !isAdminActive()) { enterAdmin('admin'); return; }
         if (btn.getAttribute('data-mine')) { state.query.mine = true; state.query.preset = 'all'; state.query.from = ''; state.query.to = ''; }
         state.tab = t; render();
@@ -1544,7 +1577,6 @@
 
   /* ---------- boot ---------- */
   var initialTab = (window.location.hash || '').replace('#', '');
-  if (initialTab === 'budget') initialTab = 'admin';
   if (TABS.indexOf(initialTab) >= 0) state.tab = initialTab;
   (function () {
     var r = presetRange(state.query.preset); state.query.from = r.from; state.query.to = r.to;

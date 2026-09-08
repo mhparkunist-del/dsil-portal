@@ -316,9 +316,23 @@ drop policy if exists "projects: admin write"  on public.projects;
 create policy "projects: admin read"  on public.projects for select to authenticated using (public.is_admin());
 create policy "projects: admin write" on public.projects for all    to authenticated using (public.is_admin()) with check (public.is_admin());
 
+-- 과제 담당자(owners): 관리자가 아니어도 자기 담당 과제의 예산은 볼 수 있습니다.
+alter table public.projects add column if not exists owners jsonb not null default '[]'::jsonb;
+
+create or replace function public.is_project_owner(p_owners jsonb)
+returns boolean language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from jsonb_array_elements_text(coalesce(p_owners, '[]'::jsonb)) o
+    join public.profiles me on me.id = auth.uid()
+    where public.name_key(o) = public.name_key(me.name)
+  );
+$$;
+
 drop view if exists public.projects_public;
 create view public.projects_public as
-select id, code, name, start_date, end_date, manager, active, created_at, alias, participants
+select id, code, name, start_date, end_date, manager, active, created_at, alias, participants, owners,
+       account_manager, card_users,
+       case when public.is_admin() or public.is_project_owner(owners) then budgets else '{}'::jsonb end as budgets
 from public.projects;
 alter view public.projects_public set (security_invoker = false);
 grant select on public.projects_public to authenticated;

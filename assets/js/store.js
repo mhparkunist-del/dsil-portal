@@ -360,6 +360,7 @@
       delete p.budget;
       if (p.accountManager === undefined) p.accountManager = '';
       if (!Array.isArray(p.cardUsers)) p.cardUsers = [];   /* 카드 실사용자(참여연구원) 목록 */
+      if (!Array.isArray(p.owners)) p.owners = [];            /* 과제 담당자 이름 목록 — 관리자가 아니어도 이 과제 예산을 봄 */
       if (p.alias === undefined) p.alias = '';               /* 참여과제 시트의 과제 약칭 */
       if (!Array.isArray(p.participants)) p.participants = []; /* [{ name, months:{ '2026-09': true } }] 회의비 참석자 후보 */
     });
@@ -635,6 +636,7 @@
         if (!rec.id) rec.id = uid();
         if (!rec.budgets || typeof rec.budgets !== 'object') rec.budgets = {};
         if (!Array.isArray(rec.cardUsers)) rec.cardUsers = [];
+        if (!Array.isArray(rec.owners)) rec.owners = [];
         if (idx >= 0) data.projects[idx] = rec; else data.projects.push(rec);
         write(); emit();
         return Promise.resolve(clone(rec));
@@ -1295,6 +1297,7 @@
       budgets: (row.budgets && typeof row.budgets === 'object') ? row.budgets : {},
       startDate: row.start_date || '', endDate: row.end_date || '', manager: row.manager || '',
       accountManager: row.account_manager || '', cardUsers: Array.isArray(row.card_users) ? row.card_users : [],
+      owners: Array.isArray(row.owners) ? row.owners : [],
       alias: row.alias || '', participants: Array.isArray(row.participants) ? row.participants : [],
       note: row.note || '', active: row.active !== false, createdAt: row.created_at
     };
@@ -1307,6 +1310,7 @@
       code: p.code || '', name: p.name, budgets: budgets,
       start_date: p.startDate || null, end_date: p.endDate || null, manager: p.manager || '',
       account_manager: p.accountManager || '', card_users: Array.isArray(p.cardUsers) ? p.cardUsers : [],
+      owners: Array.isArray(p.owners) ? p.owners : [],
       alias: p.alias || '', participants: Array.isArray(p.participants) ? p.participants : [],
       note: p.note || '', active: p.active !== false
     };
