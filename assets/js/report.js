@@ -207,7 +207,7 @@
         var keys = f.photos[s.key] || [];
         return '<div class="mb-4"><div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-1"><div><strong>' + esc(s.label) + '</strong>' + (s.min ? ' <span class="badge bg-yellow-lt">필수 ' + s.min + '장</span>' : ' <span class="badge bg-secondary-lt">선택</span>') + '<div class="small text-secondary">' + esc(s.hint) + '</div></div>'
           + (editable ? '<label class="btn btn-sm mb-0"><i class="ti ti-upload me-1"></i>사진 추가<input type="file" accept="image/*" multiple hidden data-action="add-photo" data-slot="' + s.key + '"></label>' : '') + '</div>'
-          + '<div class="d-flex flex-wrap gap-2">' + keys.map(function (k) { var src = state.photos[k]; return '<div class="position-relative border rounded p-1" style="width:150px"><img src="' + (src ? esc(src) : '') + '" alt="" style="width:100%;height:110px;object-fit:cover;border-radius:4px;background:#f3f5f8">' + (editable ? '<button type="button" class="btn btn-sm btn-icon btn-danger position-absolute top-0 end-0 m-1" data-action="remove-photo" data-slot="' + s.key + '" data-key="' + esc(k) + '" title="삭제"><i class="ti ti-x"></i></button>' : '') + '</div>'; }).join('')
+          + '<div class="d-flex flex-wrap gap-2">' + keys.map(function (k) { var src = state.photos[k]; return '<div class="position-relative border rounded p-1" style="width:240px"><img src="' + (src ? esc(src) : '') + '" alt="" style="width:100%;height:200px;object-fit:contain;border-radius:4px;background:#f3f5f8">' + (editable ? '<button type="button" class="btn btn-sm btn-icon btn-danger position-absolute top-0 end-0 m-1" data-action="remove-photo" data-slot="' + s.key + '" data-key="' + esc(k) + '" title="삭제"><i class="ti ti-x"></i></button>' : '') + '</div>'; }).join('')
           + (!keys.length ? '<div class="text-secondary small">아직 없음</div>' : '') + '</div></div>';
       }).join('')
       + '</div></div>';
@@ -254,7 +254,7 @@
   }
   function docxParagraph(text, opts) {
     opts = opts || {};
-    return '<w:p>' + (opts.pageBreak ? '<w:r><w:br w:type="page"/></w:r>' : '') + '<w:pPr>' + (opts.spacing !== false ? '<w:spacing w:before="120" w:after="120"/>' : '') + '</w:pPr>'
+    return '<w:p>' + (opts.pageBreak ? '<w:r><w:br w:type="page"/></w:r>' : '') + '<w:pPr>' + (opts.bold ? '<w:keepNext/>' : '') + (opts.spacing !== false ? '<w:spacing w:before="120" w:after="120"/>' : '') + '</w:pPr>'
       + (text !== undefined ? '<w:r><w:rPr>' + (opts.bold ? '<w:b/>' : '') + '<w:sz w:val="' + (opts.size || 22) + '"/></w:rPr><w:t xml:space="preserve">' + xmlEsc(text) + '</w:t></w:r>' : '') + '</w:p>';
   }
   function docxImage(rid, cx, cy, n) {
@@ -277,7 +277,8 @@
     var zip = new JSZip();
     var media = [], rels = [], body = [];
     var n = 0;
-    var MAXW = 5760000, MAXH = 8200000; /* EMU: 16cm × 22.8cm */
+    /* EMU (1cm = 360000). 여백 1.5cm 기준 본문 폭 18cm; 사진은 폭에 꽉 채우고 높이는 한 페이지(약 25cm)까지 */
+    var MAXW = 6480000, MAXH = 9000000, BIG = 8640000;
     function addImage(dataUrl, maxW, maxH) {
       var b = dataUrlToBytes(dataUrl); if (!b) return Promise.resolve('');
       return imgSize(dataUrl).then(function (sz) {
@@ -293,7 +294,7 @@
       var keys = f.photos[key] || [];
       return keys.reduce(function (pr, k) { return pr.then(function () { var v = state.photos[k]; return v ? addImage(v, MAXW, maxH).then(function (x) { body.push(x); }) : null; }); }, Promise.resolve());
     }
-    return addSlot('▶ 영수증', 'receipt', 3600000).then(function () { return addSlot('▶ 거래내역', 'transaction', 3600000); }).then(function () {
+    return addSlot('▶ 영수증', 'receipt', BIG).then(function () { return addSlot('▶ 거래내역', 'transaction', BIG); }).then(function () {
       body.push(docxParagraph('▶ 기타 정보', { bold: true, size: 26 }));
       var sigCell = function (name) { var v = state.sigs[name]; return v ? addImage(v, 900000, 360000) : Promise.resolve(''); };
       return Promise.all([sigCell(f.cardUser), sigCell(f.endUser)]).then(function (sigs) {
@@ -312,7 +313,7 @@
       });
     }).then(function () {
       var doc = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"><w:body>'
-        + body.join('') + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/></w:sectPr></w:body></w:document>';
+        + body.join('') + '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="850" w:right="850" w:bottom="850" w:left="850" w:header="500" w:footer="500" w:gutter="0"/></w:sectPr></w:body></w:document>';
       zip.file('[Content_Types].xml', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="jpg" ContentType="image/jpeg"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>');
       zip.file('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>');
       zip.file('word/_rels/document.xml.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' + rels.join('') + '</Relationships>');
