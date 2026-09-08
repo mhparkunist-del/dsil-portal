@@ -15,6 +15,22 @@ window.DSIL_CONFIG = {
 
   /* 관리자 탭에 들어갈 때마다 묻는 PIN. 공용 DB 모드에서는 profiles.is_admin 인 사람만 이 단계까지 옵니다. */
   adminPin: '0000',
+
+  /* 기본 계정 (local 모드): 처음 열 때 없으면 승인된 구성원으로 만들어 둡니다. 같은 이름이 이미 있으면 건드리지 않습니다.
+     PIN 은 저장 시 SHA-256 으로 해시되며, 각자 로그인 후 바꾸는 것을 권장합니다. */
+  defaultAccounts: [
+    { name: '이현진', pin: '0000' },
+    { name: '백승훈', pin: '0000' },
+    { name: '위동진', pin: '0000' },
+    { name: '김형준', pin: '0000' },
+    { name: '음성민', pin: '0000' },
+    { name: '양희수', pin: '0000' }
+  ],
+
+  /* 기본 장비 (local 모드): 이름이 같은 장비가 없으면 만들어 둡니다. managerPin 은 담당자 PIN, users 는 미리 등록할 사용자와 등급. */
+  defaultEquipment: [
+    { name: '프로브 스테이션', location: '', managerName: '백승훈', managerPin: '0000', color: '#004191', description: '', rules: '', users: [{ name: '백승훈', grade: 'super' }] }
+  ],
   /* PIN 을 맞힌 뒤 관리자 잠금이 유지되는 시간(분). 지나면 다시 묻습니다. */
   adminUnlockMinutes: 10,
 

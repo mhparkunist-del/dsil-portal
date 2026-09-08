@@ -394,6 +394,21 @@
     if (!data.accounts.some(function (a) { return a.role === 'admin'; })) {
       data.accounts.unshift({ id: SUPER_ADMIN.id, name: SUPER_ADMIN.name, pinHash: '', seedPin: SUPER_ADMIN.seedPin, role: 'admin', status: 'active', createdAt: nowISO(), approvedAt: nowISO(), approvedBy: '시스템' });
     }
+    /* config.defaultAccounts / defaultEquipment: 이름 기준으로 없을 때만 만들어 둠 (PIN 은 ensureSeedHashes 가 해시) */
+    (cfg.defaultAccounts || []).forEach(function (d) {
+      if (!d || !d.name) return;
+      if (data.accounts.some(function (a) { return nameKey(a.name) === nameKey(d.name); })) return;
+      data.accounts.push({ id: uid(), name: String(d.name).trim(), pinHash: '', seedPin: String(d.pin || '0000'), role: d.role === 'admin' ? 'admin' : 'member', status: 'active', createdAt: nowISO(), approvedAt: nowISO(), approvedBy: '시스템 (기본 계정)' });
+    });
+    (cfg.defaultEquipment || []).forEach(function (d) {
+      if (!d || !d.name) return;
+      if (data.equipment.some(function (e) { return nameKey(e.name) === nameKey(d.name); })) return;
+      data.equipment.push({
+        id: uid(), name: String(d.name).trim(), location: d.location || '', managerName: d.managerName || '', managerPinHash: '', seedManagerPin: d.managerPin ? String(d.managerPin) : '',
+        description: d.description || '', rules: d.rules || '', color: d.color || '#004191', active: true, createdAt: nowISO(),
+        users: (d.users || []).map(function (u) { return { id: uid(), name: String(u.name || '').trim(), grade: u.grade || 'user', grantedAt: nowISO(), grantedBy: '시스템 (기본 설정)' }; }).filter(function (u) { return u.name; })
+      });
+    });
     return data;
   }
 
@@ -473,8 +488,12 @@
     /* 시드 계정의 평문 PIN 을 해시로 바꿔 저장 (관리자 / 0000) */
     function ensureSeedHashes() {
       var todo = data.accounts.filter(function (a) { return !a.pinHash && a.seedPin; });
-      if (!todo.length) return Promise.resolve();
-      return Promise.all(todo.map(function (a) { return hashPin(a.seedPin).then(function (h) { a.pinHash = h; delete a.seedPin; }); })).then(function () { write(); });
+      var todoEq = data.equipment.filter(function (e) { return !e.managerPinHash && e.seedManagerPin; });
+      if (!todo.length && !todoEq.length) return Promise.resolve();
+      return Promise.all(
+        todo.map(function (a) { return hashPin(a.seedPin).then(function (h) { a.pinHash = h; delete a.seedPin; }); })
+          .concat(todoEq.map(function (e) { return hashPin(e.seedManagerPin).then(function (h) { e.managerPinHash = h; delete e.seedManagerPin; }); }))
+      ).then(function () { write(); });
     }
 
     function readSession() {
