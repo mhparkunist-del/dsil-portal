@@ -910,8 +910,14 @@ create view public.inventory_managers_public as select id, name, area, created_a
 alter view public.inventory_managers_public set (security_invoker = false);
 grant select on public.inventory_managers_public to authenticated;
 
+-- 담당자 확인: PIN 이 맞고, 로그인한 사람이 그 담당자로 등록돼 있어야 함 (포털 관리자는 예외)
 create or replace function public.inv_verify_manager(p_manager_id uuid, p_pin text) returns boolean language sql stable security definer set search_path = public as $$
-  select exists (select 1 from public.inventory_managers m where m.id = p_manager_id and m.pin_hash = encode(digest(coalesce(p_pin, ''), 'sha256'), 'hex'));
+  select exists (
+    select 1 from public.inventory_managers m join public.profiles me on me.id = auth.uid()
+    where m.id = p_manager_id
+      and m.pin_hash = encode(digest(coalesce(p_pin, ''), 'sha256'), 'hex')
+      and (me.is_admin or public.name_key(m.name) = public.name_key(me.name))
+  );
 $$;
 
 create or replace function public.inv_save_item(p_manager_id uuid, p_pin text, p_item jsonb)

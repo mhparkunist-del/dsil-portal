@@ -27,10 +27,18 @@
   function me() { return state.session ? state.session.user : null; }
   function itemById(id) { return state.items.filter(function (x) { return x.id === id; })[0] || null; }
   function managerById(id) { return state.managers.filter(function (x) { return x.id === id; })[0] || null; }
+  /* 소모품 담당자 권한: 등록된 담당자 이름과 로그인 이름이 같아야 함 (포털 관리자는 전체) */
+  function nameKey(s) { return String(s || '').replace(/\s+/g, '').toLowerCase(); }
+  function isMyManagerEntry(m) {
+    var u = me();
+    if (!u || !m) return false;
+    if (state.session && state.session.isAdmin) return true;
+    return nameKey(m.name) === nameKey(u.name);
+  }
+  function myManagerEntries() { return state.managers.filter(isMyManagerEntry); }
   function locations() { var s = {}; state.items.forEach(function (i) { if (i.location) s[i.location] = true; }); return Object.keys(s).sort(); }
   function isLow(i) { return i.active !== false && i.minQty > 0 && i.qty <= i.minQty; }
   function qtyStr(i) { return nf.format(i.qty) + esc(i.unit || ''); }
-  function value(i) { return (Number(i.qty) || 0) * (Number(i.unitPrice) || 0); }
 
   function readUnlock() { try { var t = Number(sessionStorage.getItem(ADMIN_KEY) || 0); var mins = Number(CFG.adminUnlockMinutes) > 0 ? Number(CFG.adminUnlockMinutes) : 10; return t > 0 && (Date.now() - t) < mins * 60000; } catch (e) { return false; } }
   function setUnlock(on) { try { if (on) sessionStorage.setItem(ADMIN_KEY, String(Date.now())); else sessionStorage.removeItem(ADMIN_KEY); } catch (e) { /* ignore */ } state.adminUnlocked = on; }
@@ -81,15 +89,14 @@
 
     var active = state.items.filter(function (i) { return i.active !== false; });
     var low = active.filter(isLow);
-    var total = active.reduce(function (s, i) { return s + value(i); }, 0);
     var mStart = new Date(); mStart.setDate(1); mStart.setHours(0, 0, 0, 0);
     var outMonth = state.moves.filter(function (m) { return m.type === 'out' && new Date(m.createdAt) >= mStart; });
 
     var html = '<div class="row row-deck row-cards mb-3">'
       + stat('품목', active.length + '종', locations().length + '개 보관 장소', '')
       + stat('재고 부족', low.length + '종', low.length ? low.slice(0, 2).map(function (i) { return i.name; }).join(', ') + (low.length > 2 ? ' 외' : '') : '최소 수량 이상', low.length ? 'text-red' : 'text-green')
-      + stat('재고 금액', won(total), '보유량 × 단가', 'text-primary')
-      + stat('이번 달 소모', outMonth.length + '건', won(outMonth.reduce(function (s, m) { return s + m.qty * m.unitPrice; }, 0)), '')
+      + stat('이번 달 소모', outMonth.length + '건', Object.keys(outMonth.reduce(function (o, m) { o[m.itemId] = 1; return o; }, {})).length + '종 · 최근 ' + (outMonth[0] ? fmtDate(outMonth[0].createdAt) : '-'), 'text-primary')
+      + stat('사용 중지', state.items.filter(function (i) { return i.active === false; }).length + '종', '소모 처리에서 제외', '')
       + '</div>';
 
     if (low.length) {
@@ -142,8 +149,6 @@
       + '<td><div class="fw-medium">' + esc(i.name) + (i.active === false ? ' <span class="badge bg-secondary-lt">중지</span>' : '') + '</div><div class="small text-secondary">' + esc(i.category || '') + (i.note ? ' · ' + esc(i.note) : '') + '</div></td>'
       + '<td class="text-nowrap">' + esc(i.location || '-') + '</td>'
       + '<td class="text-end text-nowrap tnum"><span class="' + (low ? 'text-red fw-bold' : 'fw-medium') + '">' + qtyStr(i) + '</span>' + (i.minQty ? '<div class="small text-secondary">최소 ' + nf.format(i.minQty) + '</div>' : '') + '</td>'
-      + '<td class="text-end text-nowrap tnum">' + won(i.unitPrice) + '</td>'
-      + '<td class="text-end text-nowrap tnum">' + won(value(i)) + '</td>'
       + '<td class="text-end text-nowrap">' + (withActions
         ? '<button type="button" class="btn btn-sm" data-action="restock" data-item="' + esc(i.id) + '"><i class="ti ti-plus me-1"></i>입고</button> <button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="edit-item" data-item="' + esc(i.id) + '" title="수정"><i class="ti ti-edit"></i></button><button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="delete-item" data-item="' + esc(i.id) + '" title="삭제"><i class="ti ti-trash"></i></button>'
         : '') + '</td></tr>';
@@ -157,7 +162,7 @@
       + locs.map(function (l) { return '<button type="button" class="btn btn-sm ' + (state.filterLoc === l ? 'btn-primary' : 'btn-outline-secondary') + '" data-action="filter-loc" data-loc="' + esc(l) + '"><i class="ti ti-map-pin me-1"></i>' + esc(l) + '</button>'; }).join('')
       + '<a href="#consume" class="ms-auto small" data-action="tab" data-tab="consume">소모 처리는 소모 처리 탭에서 <i class="ti ti-arrow-right"></i></a></div>';
     if (!list.length) body += '<div class="card-body">' + empty('package-off', '등록된 품목이 없습니다', '담당자 탭에서 품목을 등록하세요.') + '</div>';
-    else body += '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>품목</th><th>보관 장소</th><th class="text-end">재고</th><th class="text-end">단가</th><th class="text-end">금액</th><th class="w-1"></th></tr></thead><tbody>' + list.map(function (i) { return itemRow(i, false); }).join('') + '</tbody></table></div>';
+    else body += '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>품목</th><th>보관 장소</th><th class="text-end">재고</th><th class="w-1"></th></tr></thead><tbody>' + list.map(function (i) { return itemRow(i, false); }).join('') + '</tbody></table></div>';
     return { body: body };
   }
 
@@ -215,8 +220,8 @@
 
   function exportHistory() {
     var list = state.moves.filter(function (m) { return state.histType === 'all' || m.type === state.histType; });
-    var head = ['일시', '구분', '품목', '보관 장소', '수량', '단가', '재고', '처리자', '메모'];
-    var lines = list.map(function (m) { return [fmtDateTime(m.createdAt), (MOVE[m.type] || {}).label || m.type, m.itemName, m.location, m.qty, m.unitPrice, m.stockAfter, m.userName, m.note].map(csvCell).join(','); });
+    var head = ['일시', '구분', '품목', '보관 장소', '수량', '재고', '처리자', '메모'];
+    var lines = list.map(function (m) { return [fmtDateTime(m.createdAt), (MOVE[m.type] || {}).label || m.type, m.itemName, m.location, m.qty, m.stockAfter, m.userName, m.note].map(csvCell).join(','); });
     download('dsil-inventory-' + new Date().toISOString().slice(0, 10) + '.csv', '﻿' + head.join(',') + '\r\n' + lines.join('\r\n'), 'text/csv;charset=utf-8');
   }
 
@@ -231,8 +236,7 @@
       + '<div class="col-4"><label class="form-label required">' + (editing ? '현재 보유량' : '초기 보유량') + '</label><input type="number" class="form-control tnum" name="qty" min="0" step="any" required value="' + (editing ? editing.qty : '') + '"></div>'
       + '<div class="col-4"><label class="form-label">단위</label><input type="text" class="form-control" name="unit" value="' + esc(editing ? editing.unit : '개') + '"></div>'
       + '<div class="col-4"><label class="form-label">최소 수량</label><input type="number" class="form-control tnum" name="minQty" min="0" step="any" value="' + (editing ? editing.minQty : '') + '" placeholder="알림 기준"></div>'
-      + '<div class="col-6"><label class="form-label required">단가 (원)</label><input type="number" class="form-control tnum" name="unitPrice" min="0" step="1" required value="' + (editing ? editing.unitPrice : '') + '"></div>'
-      + '<div class="col-6"><label class="form-label">메모</label><input type="text" class="form-control" name="note" value="' + esc(editing ? editing.note : '') + '" placeholder="보관 조건 등"></div>'
+      + '<div class="col-12"><label class="form-label">메모</label><input type="text" class="form-control" name="note" value="' + esc(editing ? editing.note : '') + '" placeholder="보관 조건 등"></div>'
       + (editing ? '<div class="col-12"><label class="form-label">보유량 변경 사유 <span class="form-label-description">보유량을 바꾸면 조정 이력에 남습니다</span></label><input type="text" class="form-control" name="adjustNote" placeholder="예: 실사 결과 반영"></div>'
         + '<div class="col-12"><label class="form-check form-switch mb-0"><input class="form-check-input" type="checkbox" name="active"' + (editing.active !== false ? ' checked' : '') + '><span class="form-check-label">사용 중 (소모 처리 가능)</span></label></div>' : '')
       + '</div><div class="d-flex justify-content-end gap-2 mt-3">' + (editing ? '<button type="button" class="btn" data-action="cancel-edit-item">취소</button>' : '') + '<button type="submit" class="btn btn-primary"><i class="ti ti-device-floppy me-1"></i>' + (editing ? '저장' : '품목 등록') + '</button></div></form>';
@@ -240,12 +244,29 @@
 
   function renderManagerTab() {
     if (!state.manager) {
-      var opts = state.managers.map(function (m) { return '<option value="' + esc(m.id) + '">' + esc(m.name) + (m.area ? ' · ' + esc(m.area) : '') + '</option>'; }).join('');
-      return { body: '<div class="card-body"><div class="container-tight"><h3 class="card-title mb-1"><i class="ti ti-user-shield me-1 text-primary"></i>중간 관리자 확인</h3>'
-        + '<p class="text-secondary small mb-3">담당자를 고르고 PIN을 입력하면 ' + INV.managerUnlockMinutes + '분 동안 품목 등록·입고·조정이 열립니다.</p>'
-        + (state.managers.length ? '<form id="mgr-form"><div class="mb-3"><label class="form-label required">담당자</label><select class="form-select" name="managerId" required>' + opts + '</select></div>'
+      /* 내 이름으로 등록된 담당자만 (포털 관리자는 전체) */
+      var mine = myManagerEntries();
+      var u = me();
+      var opts = mine.map(function (m) { return '<option value="' + esc(m.id) + '">' + esc(m.name) + (m.area ? ' · ' + esc(m.area) : '') + '</option>'; }).join('');
+      var body = '<div class="card-body"><div class="container-tight"><h3 class="card-title mb-1"><i class="ti ti-user-shield me-1 text-primary"></i>소모품 담당자 확인</h3>'
+        + '<p class="text-secondary small mb-3">담당자로 등록된 계정만 열 수 있습니다. PIN을 입력하면 ' + INV.managerUnlockMinutes + '분 동안 품목 등록·입고·조정이 열립니다.</p>';
+      if (!state.managers.length) body += empty('user-off', '등록된 소모품 담당자가 없습니다', '관리자 탭에서 추가하세요.');
+      else if (!mine.length) {
+        body += empty('user-shield', '담당자로 등록되어 있지 않습니다', '지금 로그인한 계정(' + (u ? u.name : '') + ')은 소모품 담당자가 아닙니다. 관리자에게 담당자 등록을 요청하세요.')
+          + '<div class="table-responsive"><table class="table table-sm table-vcenter"><thead><tr><th>담당자</th><th>담당 영역</th></tr></thead><tbody>'
+          + state.managers.map(function (m) { return '<tr><td class="fw-medium">' + esc(m.name) + '</td><td class="text-secondary">' + esc(m.area || '-') + '</td></tr>'; }).join('')
+          + '</tbody></table></div>';
+      } else {
+        body += '<form id="mgr-form"><div class="mb-3"><label class="form-label required">담당자</label><select class="form-select" name="managerId" required>' + opts + '</select></div>'
           + '<div class="mb-3"><label class="form-label required">PIN</label><input type="password" class="form-control" name="pin" required inputmode="numeric" autocomplete="off"></div><button type="submit" class="btn btn-primary w-100"><i class="ti ti-key me-1"></i>열기</button></form>'
-          : empty('user-off', '등록된 중간 관리자가 없습니다', '관리자 탭에서 추가하세요.')) + '</div></div>' };
+          + '<div class="text-secondary small mt-3"><i class="ti ti-id me-1"></i>' + esc(u ? u.name : '') + ' 님으로 등록된 담당 ' + mine.length + '건' + (isAdminEligible() ? ' (관리자 계정이라 전체가 보입니다)' : '') + '</div>';
+      }
+      return { body: body + '</div></div>' };
+    }
+    /* 등록이 취소됐으면 열려 있던 담당자 모드를 닫음 */
+    if (!isMyManagerEntry(managerById(state.manager.managerId))) {
+      setManager(null);
+      return { body: '<div class="card-body">' + empty('user-shield', '담당자 권한이 없습니다', '담당자 등록이 바뀌어 담당자 모드를 닫았습니다.') + '</div>' };
     }
     var mgr = managerById(state.manager.managerId);
     var editing = state.editingItemId ? itemById(state.editingItemId) : null;
@@ -259,27 +280,26 @@
       + '</div></div></div>';
     var after = '<div class="card mb-3"><div class="card-header"><h3 class="card-title"><i class="ti ti-packages me-1 text-primary"></i>전체 품목 <span class="text-secondary fw-normal">' + state.items.length + '종</span></h3></div>';
     if (!state.items.length) after += '<div class="card-body">' + empty('package-off', '등록된 품목이 없습니다', '') + '</div>';
-    else after += '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>품목</th><th>보관 장소</th><th class="text-end">재고</th><th class="text-end">단가</th><th class="text-end">금액</th><th class="w-1"></th></tr></thead><tbody>' + state.items.slice().sort(function (a, b) { return (a.location + a.name).localeCompare(b.location + b.name); }).map(function (i) { return itemRow(i, true); }).join('') + '</tbody></table></div>';
+    else after += '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th>품목</th><th>보관 장소</th><th class="text-end">재고</th><th class="w-1"></th></tr></thead><tbody>' + state.items.slice().sort(function (a, b) { return (a.location + a.name).localeCompare(b.location + b.name); }).map(function (i) { return itemRow(i, true); }).join('') + '</tbody></table></div>';
     after += '</div>';
     return { body: body, after: after };
   }
 
   function restockDialog(itemId) {
     var i = itemById(itemId); if (!i) return Promise.resolve();
-    var body = '<div class="text-secondary small mb-3">' + esc(i.location) + ' · 현재 ' + qtyStr(i) + ' · 단가 ' + won(i.unitPrice) + '</div><div class="row g-3">'
-      + '<div class="col-6"><label class="form-label required">입고 수량 (' + esc(i.unit) + ')</label><input type="number" class="form-control tnum" name="qty" min="0.01" step="any" required value="1"></div>'
-      + '<div class="col-6"><label class="form-label">단가 (원) <span class="form-label-description">비우면 유지</span></label><input type="number" class="form-control tnum" name="unitPrice" min="0" step="1" placeholder="' + i.unitPrice + '"></div>'
+    var body = '<div class="text-secondary small mb-3">' + esc(i.location) + ' · 현재 ' + qtyStr(i) + '</div><div class="row g-3">'
+      + '<div class="col-12"><label class="form-label required">입고 수량 (' + esc(i.unit) + ')</label><input type="number" class="form-control tnum" name="qty" min="0.01" step="any" required value="1"></div>'
       + '<div class="col-12"><label class="form-label">메모</label><input type="text" class="form-control" name="note" placeholder="구매처, 발주 번호 등"></div></div>';
     return dialog({ title: '입고 · ' + i.name, bodyHtml: body, size: 'lg', okLabel: '입고' }).then(function (v) {
       if (!v) return;
-      return store.invRestock(i.id, Number(v.qty), v.unitPrice ? Number(v.unitPrice) : 0, v.note, creds()).then(function () { toast('입고 처리했습니다.'); touchManager(); return refresh(); });
+      return store.invRestock(i.id, Number(v.qty), 0, v.note, creds()).then(function () { toast('입고 처리했습니다.'); touchManager(); return refresh(); });
     });
   }
 
   /* ---------- 관리자 탭 ---------- */
   function renderAdminTab() {
     if (!isAdminActive()) return { body: '<div class="card-body">' + empty('lock', '관리자 화면이 잠겨 있습니다', '관리자 PIN을 입력하면 열립니다.') + '<div class="text-center"><button type="button" class="btn btn-primary" data-action="unlock-admin"><i class="ti ti-key me-1"></i>PIN 입력</button></div></div>' };
-    var body = '<div class="card-body py-2 d-flex align-items-center justify-content-between flex-wrap gap-2 border-bottom"><div class="text-secondary small"><i class="ti ti-lock-open me-1"></i>관리자 모드 · 중간 관리자를 두면 그 사람이 PIN으로 품목·보유량·단가를 관리합니다.</div>'
+    var body = '<div class="card-body py-2 d-flex align-items-center justify-content-between flex-wrap gap-2 border-bottom"><div class="text-secondary small"><i class="ti ti-lock-open me-1"></i>관리자 모드 · 소모품 담당자를 두면 그 사람이 본인 계정으로 로그인해 PIN을 넣고 품목·보유량을 관리합니다. 담당자 이름은 포털 로그인 이름과 같아야 합니다.</div>'
       + '<button type="button" class="btn btn-sm btn-ghost-secondary" data-action="lock-admin"><i class="ti ti-lock me-1"></i>잠금</button></div>'
       + '<div class="card-body"><div class="row g-4"><div class="col-lg-5"><h3 class="card-title mb-3"><i class="ti ti-user-plus me-1 text-primary"></i>중간 관리자 추가</h3>'
       + '<form id="mgr-add-form"><div class="row g-3"><div class="col-12"><label class="form-label required">이름</label><input type="text" class="form-control" name="name" required></div>'
@@ -321,7 +341,8 @@
       e.preventDefault();
       var v = readForm(form);
       var id = form.getAttribute('data-id') || null;
-      var rec = { name: v.name, category: v.category, location: v.location, qty: Number(v.qty), unit: v.unit || '개', minQty: Number(v.minQty) || 0, unitPrice: Number(v.unitPrice) || 0, note: v.note, adjustNote: v.adjustNote || '', active: id ? !!v.active : true };
+      var prev = id ? itemById(id) : null;
+      var rec = { name: v.name, category: v.category, location: v.location, qty: Number(v.qty), unit: v.unit || '개', minQty: Number(v.minQty) || 0, unitPrice: prev ? (prev.unitPrice || 0) : 0, note: v.note, adjustNote: v.adjustNote || '', active: id ? !!v.active : true };
       if (id) rec.id = id;
       store.invSaveItem(rec, creds()).then(function () { toast(id ? '품목을 수정했습니다.' : '품목을 등록했습니다.'); state.editingItemId = null; touchManager(); return refresh(); }).catch(handleError);
     }

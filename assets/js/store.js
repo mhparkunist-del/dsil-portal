@@ -524,6 +524,27 @@
     function managerDeniedMsg(eq) {
       return '이 장비의 담당자로 지정된 계정이 아닙니다. 담당자는 ' + ((eq && eq.managerName) ? eq.managerName : '미지정') + ' 입니다. 관리자에게 담당자 변경을 요청하세요.';
     }
+    /* 소모품 중간 관리자: 등록된 담당자 이름과 로그인 이름이 같아야 함 (포털 관리자는 전체) */
+    function isInvManager(m) {
+      if (!session || !m) return false;
+      if (session.isAdmin) return true;
+      return nameKey(m.name) === nameKey(session.user.name);
+    }
+    function invDeniedMsg(m) {
+      return '소모품 담당자로 등록된 계정이 아닙니다. 이 항목의 담당자는 ' + ((m && m.name) ? m.name : '미지정') + ' 입니다. 관리자에게 담당자 등록을 요청하세요.';
+    }
+    /* 담당자 확인 + PIN. creds = { managerId, pin } */
+    function checkInvManager(creds) {
+      var err = needSession(); if (err) return Promise.reject(err);
+      var m = data.invManagers.filter(function (x) { return x.id === (creds && creds.managerId); })[0];
+      if (!m) return Promise.reject(new Error('중간 관리자 확인이 필요합니다.'));
+      if (!isInvManager(m)) return Promise.reject(new Error(invDeniedMsg(m)));
+      return hashPin(creds.pin).then(function (h) {
+        if (h !== m.pinHash) throw new Error('담당자 PIN이 올바르지 않습니다.');
+        return m;
+      });
+    }
+
     /* managerPin === null 이면 포털 관리자 경로, 아니면 담당자 이름 + PIN 을 함께 확인 */
     function checkManager(eq, managerPin) {
       var err = needSession(); if (err) return Promise.reject(err);
@@ -1199,6 +1220,7 @@
       invVerifyManager: function (managerId, pin) {
         var m = data.invManagers.filter(function (x) { return x.id === managerId; })[0];
         if (!m) return Promise.resolve(false);
+        if (!isInvManager(m)) return Promise.reject(new Error(invDeniedMsg(m)));
         return hashPin(pin).then(function (h) { return h === m.pinHash; });
       },
 
@@ -1206,10 +1228,7 @@
       invListMoves: function () { return Promise.resolve(clone(data.invMoves)); },
 
       invSaveItem: function (item, creds) {
-        var m = data.invManagers.filter(function (x) { return x.id === (creds && creds.managerId); })[0];
-        if (!m) return Promise.reject(new Error('중간 관리자 확인이 필요합니다.'));
-        return hashPin(creds.pin).then(function (h) {
-          if (h !== m.pinHash) throw new Error('담당자 PIN이 올바르지 않습니다.');
+        return checkInvManager(creds).then(function (m) {
           var nm = String(item.name || '').trim();
           if (!nm) throw new Error('품목명을 입력하세요.');
           var qty = Math.max(0, Number(item.qty) || 0);
@@ -1236,10 +1255,7 @@
       },
 
       invDeleteItem: function (id, creds) {
-        var m = data.invManagers.filter(function (x) { return x.id === (creds && creds.managerId); })[0];
-        if (!m) return Promise.reject(new Error('중간 관리자 확인이 필요합니다.'));
-        return hashPin(creds.pin).then(function (h) {
-          if (h !== m.pinHash) throw new Error('담당자 PIN이 올바르지 않습니다.');
+        return checkInvManager(creds).then(function () {
           if (data.invMoves.some(function (mv) { return mv.itemId === id && mv.type === 'out'; })) throw new Error('소모 기록이 있는 품목은 삭제할 수 없습니다. 사용 중지로 바꾸세요.');
           data.invItems = data.invItems.filter(function (x) { return x.id !== id; });
           data.invMoves = data.invMoves.filter(function (x) { return x.itemId !== id; });
@@ -1248,10 +1264,7 @@
       },
 
       invRestock: function (itemId, qty, unitPrice, note, creds) {
-        var m = data.invManagers.filter(function (x) { return x.id === (creds && creds.managerId); })[0];
-        if (!m) return Promise.reject(new Error('중간 관리자 확인이 필요합니다.'));
-        return hashPin(creds.pin).then(function (h) {
-          if (h !== m.pinHash) throw new Error('담당자 PIN이 올바르지 않습니다.');
+        return checkInvManager(creds).then(function (m) {
           var it = data.invItems.filter(function (x) { return x.id === itemId; })[0];
           if (!it) throw new Error('품목을 찾을 수 없습니다.');
           var q = Number(qty) || 0;
