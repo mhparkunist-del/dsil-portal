@@ -2,9 +2,9 @@
 <html lang="ko" data-bs-theme="light">
 <head>
   <meta charset="utf-8">
-  <title>구매 요청 | DSIL Lab Portal</title>
+  <title>회의비 처리 | DSIL Lab Portal</title>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="description" content="DSIL 연구실 과제별 예산 저장·배정 시스템. 구매 요청을 올리면 관리자가 과제와 비목을 배정하고 예산이 자동으로 관리됩니다.">
+  <meta name="description" content="DSIL 연구실 회의비 청구·처리. 회의 정보와 금액을 올리면 관리자가 과제와 비목을 배정합니다.">
   <link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.5.0/dist/css/tabler.min.css">
@@ -34,21 +34,11 @@
         <div class="d-flex align-items-center order-md-last ms-auto ms-md-0" id="user-slot"></div>
         <div class="collapse navbar-collapse" id="navbar-menu">
           <ul class="navbar-nav">
-            <li class="nav-item">
-              <a class="nav-link" href="../index.html"><span class="nav-link-icon"><i class="ti ti-home"></i></span><span class="nav-link-title">홈</span></a>
-            </li>
-            <li class="nav-item active">
-              <a class="nav-link" href="./index.html"><span class="nav-link-icon"><i class="ti ti-shopping-cart"></i></span><span class="nav-link-title">구매 요청</span></a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="../equipment/index.html"><span class="nav-link-icon"><i class="ti ti-calendar-event"></i></span><span class="nav-link-title">장비 예약</span></a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="../meeting/index.html"><span class="nav-link-icon"><i class="ti ti-users-group"></i></span><span class="nav-link-title">회의비</span></a>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link" href="../inventory/index.html"><span class="nav-link-icon"><i class="ti ti-packages"></i></span><span class="nav-link-title">재고</span></a>
-            </li>
+            <li class="nav-item"><a class="nav-link" href="../index.html"><span class="nav-link-icon"><i class="ti ti-home"></i></span><span class="nav-link-title">홈</span></a></li>
+            <li class="nav-item"><a class="nav-link" href="../budget/index.html"><span class="nav-link-icon"><i class="ti ti-shopping-cart"></i></span><span class="nav-link-title">구매 요청</span></a></li>
+            <li class="nav-item"><a class="nav-link" href="../equipment/index.html"><span class="nav-link-icon"><i class="ti ti-calendar-event"></i></span><span class="nav-link-title">장비 예약</span></a></li>
+            <li class="nav-item active"><a class="nav-link" href="./index.html"><span class="nav-link-icon"><i class="ti ti-users-group"></i></span><span class="nav-link-title">회의비</span></a></li>
+            <li class="nav-item"><a class="nav-link" href="../inventory/index.html"><span class="nav-link-icon"><i class="ti ti-packages"></i></span><span class="nav-link-title">재고</span></a></li>
           </ul>
         </div>
       </div>
@@ -60,9 +50,11 @@
           <div class="row g-2 align-items-center">
             <div class="col">
               <div class="page-pretitle">DSIL Lab Portal</div>
-              <h2 class="page-title">구매 요청</h2>
+              <h2 class="page-title">회의비 처리</h2>
             </div>
-            <div class="col-auto ms-auto d-print-none" id="page-actions"></div>
+            <div class="col-auto ms-auto d-print-none">
+              <button type="button" class="btn btn-sm" data-action="refresh"><i class="ti ti-refresh me-1"></i>새로고침</button>
+            </div>
           </div>
         </div>
       </div>
@@ -96,7 +88,8 @@
 
   <script src="../assets/js/config.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tabler/core@1.5.0/dist/js/tabler.min.js" defer></script>
+  <script src="../assets/js/ui.js"></script>
   <script src="../assets/js/store.js"></script>
-  <script src="../assets/js/budget.js"></script>
+  <script src="../assets/js/meeting.js"></script>
 </body>
 </html>

@@ -53,8 +53,9 @@
 (function () {
   'use strict';
 
-  var DATA_KEY = 'dsil-budget-v1';
-  var SESSION_KEY = 'dsil-budget-session-v1';
+  /* v2: 예시 데이터 없이 관리자 계정만으로 시작 (이전 키의 브라우저 데이터는 더 이상 읽지 않음) */
+  var DATA_KEY = 'dsil-portal-v2';
+  var SESSION_KEY = 'dsil-portal-session-v2';
   var DEMO_PIN_HASH = '03ac674216f3e15c761ee1a5e255f067953623c8b388b4459e13f978d7c846f4'; /* sha256("1234") */
   var SUPER_ADMIN = { id: 'admin-1', name: '관리자', seedPin: '0000' };                          /* 슈퍼계정: 관리자 / 0000 */
 
@@ -135,8 +136,14 @@
     return Promise.resolve(fallbackHash(s));
   }
 
+  /* 빈 데이터: migrate() 가 관리자 계정(관리자 / 0000)과 공휴일 초기값만 채움 */
+  function emptyData() {
+    return { accounts: [], projects: [], requests: [], reviews: [], exports: [], equipment: [], reservations: [], usageLogs: [],
+      attMembers: [], attRecords: [], attLeaves: [], attHolidays: null, invManagers: [], invItems: [], invMoves: [], security: [] };
+  }
+
   /* ------------------------------------------------------------------ */
-  /*  Demo seed                                                          */
+  /*  Demo seed (config.js seedDemoData: true 일 때만)                    */
   /* ------------------------------------------------------------------ */
   function seedData() {
     var p1 = uid(), p2 = uid(), p3 = uid();
@@ -268,6 +275,8 @@
     (data.requests || []).forEach(function (r) {
       if (!r.category || ids.indexOf(r.category) < 0) r.category = first;
       if (r.reviewId === undefined) r.reviewId = null;
+      if (!r.kind) r.kind = 'purchase';           /* purchase(구매) | meeting(회의비) */
+      if (!r.meta || typeof r.meta !== 'object') r.meta = {};
     });
     if (!Array.isArray(data.reviews)) data.reviews = [];
     if (!Array.isArray(data.exports)) data.exports = [];
@@ -331,7 +340,7 @@
     function read() {
       try { data = JSON.parse(localStorage.getItem(DATA_KEY) || 'null'); } catch (e) { data = null; }
       if (!data || !Array.isArray(data.projects) || !Array.isArray(data.requests)) {
-        data = cfg.seedDemoData ? seedData() : { projects: [], requests: [], reviews: [], exports: [], equipment: [], reservations: [], usageLogs: [] };
+        data = cfg.seedDemoData ? seedData() : emptyData();
         migrate(data, cfg);
         write();
       } else {
@@ -502,8 +511,10 @@
         var rec = Object.assign({
           id: uid(), createdAt: nowISO(),
           requesterId: session.user.id, requesterName: session.user.name,
+          kind: 'purchase', meta: {},
           status: 'pending', projectId: null, reviewId: null, adminNote: '', processedAt: null, processedBy: null
         }, r);
+        if (rec.kind !== 'meeting') rec.kind = 'purchase';
         data.requests.unshift(rec);
         write(); emit();
         return Promise.resolve(clone(rec));
@@ -1033,7 +1044,8 @@
         data = migrate(clone(obj), cfg); write(); emit();
       },
 
-      resetDemo: function () { data = seedData(); write(); emit(); }
+      /* 초기화: seedDemoData 가 켜져 있으면 예시 데이터로, 아니면 관리자 계정만 남기고 비움 */
+      resetDemo: function () { data = migrate(cfg.seedDemoData ? seedData() : emptyData(), cfg); write(); return ensureSeedHashes().then(function () { readSession(); emit(); }); }
     };
   }
 
@@ -1073,6 +1085,7 @@
   function toRequest(row) {
     return {
       id: row.id, createdAt: row.created_at, requesterId: row.requester_id, requesterName: row.requester_name || '',
+      kind: row.kind === 'meeting' ? 'meeting' : 'purchase', meta: (row.meta && typeof row.meta === 'object') ? row.meta : {},
       item: row.item, category: row.category || '', link: row.link || '', qty: Number(row.qty) || 1, unitPrice: Number(row.unit_price) || 0,
       amount: Number(row.amount) || 0, note: row.note || '', status: row.status, projectId: row.project_id || null, reviewId: row.review_id || null,
       adminNote: row.admin_note || '', processedAt: row.processed_at || null, processedBy: row.processed_by_name || null
@@ -1081,7 +1094,7 @@
 
   function fromRequestPatch(patch) {
     var map = {
-      item: 'item', category: 'category', link: 'link', qty: 'qty', unitPrice: 'unit_price', amount: 'amount', note: 'note',
+      item: 'item', category: 'category', link: 'link', qty: 'qty', unitPrice: 'unit_price', amount: 'amount', note: 'note', kind: 'kind', meta: 'meta',
       status: 'status', projectId: 'project_id', reviewId: 'review_id', adminNote: 'admin_note', processedAt: 'processed_at',
       processedBy: 'processed_by_name', requesterName: 'requester_name'
     };

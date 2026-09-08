@@ -80,8 +80,9 @@ window.DSIL_CONFIG = {
     managerUnlockMinutes: 10     /* 중간 관리자 PIN 확인 후 잠금 유지 시간(분) */
   },
 
-  /* local 모드 첫 실행 시 예시 과제·요청을 채워 넣을지 여부 */
-  seedDemoData: true,
+  /* local 모드 첫 실행 시 예시 데이터(과제·요청·장비·출석·재고·예시 계정)를 채울지 여부.
+     false 면 관리자 계정(관리자 / 0000)만 있는 빈 상태로 시작합니다. */
+  seedDemoData: false,
 
   /* 예산 사용률 경고 기준 (0.8 = 80%) */
   warnRatio: 0.8,

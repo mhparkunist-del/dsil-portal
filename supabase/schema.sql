@@ -151,6 +151,8 @@ create table if not exists public.requests (
 );
 alter table public.requests add column if not exists category text not null default 'material';
 alter table public.requests add column if not exists review_id uuid references public.reviews (id) on delete restrict;
+alter table public.requests add column if not exists kind text not null default 'purchase';   -- purchase(구매) | meeting(회의비)
+alter table public.requests add column if not exists meta jsonb not null default '{}'::jsonb;  -- 회의비: 회의명·일시·참석자 등
 
 create index if not exists requests_status_idx   on public.requests (status);
 create index if not exists requests_project_idx  on public.requests (project_id);

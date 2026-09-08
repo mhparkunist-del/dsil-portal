@@ -10,9 +10,9 @@
   var esc = U.esc, fmtDate = U.fmtDate, fmtDateTime = U.fmtDateTime, $ = U.$, toast = U.toast, readForm = U.readForm, dialog = U.dialog, confirmDlg = U.confirmDlg, promptDlg = U.promptDlg, empty = U.empty;
   var store = window.DSILStore.create(CFG);
   var TOOLS = [
-    { id: 'budget', href: 'budget/index.html', icon: 'wallet', color: 'bg-blue-lt', title: '과제별 예산 관리' },
+    { id: 'budget', href: 'budget/index.html', icon: 'shopping-cart', color: 'bg-blue-lt', title: '구매 요청' },
     { id: 'equipment', href: 'equipment/index.html', icon: 'calendar-event', color: 'bg-orange-lt', title: '장비 예약' },
-    { id: 'attendance', href: 'attendance/index.html', icon: 'clock-check', color: 'bg-green-lt', title: '출석 시트' },
+    { id: 'meeting', href: 'meeting/index.html', icon: 'users-group', color: 'bg-green-lt', title: '회의비 처리' },
     { id: 'inventory', href: 'inventory/index.html', icon: 'packages', color: 'bg-purple-lt', title: '소모품 재고' }
   ];
   var STATUS = { active: { label: '사용 중', cls: 'bg-green-lt' }, pending: { label: '승인 대기', cls: 'bg-yellow-lt' }, disabled: { label: '중지', cls: 'bg-secondary-lt' }, rejected: { label: '거절', cls: 'bg-red-lt' } };

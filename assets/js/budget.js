@@ -551,7 +551,7 @@
 
   function itemCell(r) {
     var rv = r.reviewId ? reviewById(r.reviewId) : null;
-    return '<div class="fw-medium">' + esc(r.item)
+    return '<div class="fw-medium">' + (r.kind === 'meeting' ? '<span class="badge bg-green-lt me-1">회의비</span>' : '') + esc(r.item)
       + (r.link ? ' <a href="' + esc(r.link) + '" target="_blank" rel="noopener" class="text-secondary" title="링크 열기"><i class="ti ti-external-link"></i></a>' : '') + '</div>'
       + '<div class="small text-secondary"><span class="badge badge-outline text-primary me-1">' + esc(catLabel(normCat(r.category))) + '</span>'
       + (r.reviewId ? '<span class="badge bg-green-lt me-1" title="' + esc(rv ? rv.title : '') + '"><i class="ti ti-shield-check"></i> 심의</span>' : '') + esc(r.note || '') + '</div>'
@@ -940,7 +940,7 @@
         + '<div class="me-auto"><div class="fw-medium"><i class="ti ti-database-export me-1 text-primary"></i>데이터 백업 (로컬 모드)</div><div class="text-secondary small">로컬 모드 데이터는 이 브라우저에만 있습니다. JSON으로 내보내 공유하거나 다른 PC에서 가져올 수 있습니다.</div></div>'
         + '<button type="button" class="btn btn-sm" data-action="export"><i class="ti ti-download me-1"></i>JSON 내보내기</button>'
         + '<label class="btn btn-sm mb-0"><i class="ti ti-upload me-1"></i>JSON 가져오기<input type="file" accept="application/json" data-action="import" hidden></label>'
-        + '<button type="button" class="btn btn-sm btn-outline-danger" data-action="reset-demo">예시 데이터로 초기화</button>'
+        + '<button type="button" class="btn btn-sm btn-outline-danger" data-action="reset-demo">' + (CFG.seedDemoData ? '예시 데이터로 초기화' : '모든 데이터 삭제') + '</button>'
         + '</div></div>';
     }
     return { body: body, after: after };
@@ -1504,9 +1504,9 @@
         download('dsil-budget-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(store.exportJSON(), null, 2));
         break;
       case 'reset-demo':
-        confirmDlg({ title: '예시 데이터로 초기화', message: '모든 데이터를 지우고 예시 데이터로 되돌릴까요? 예시 심의의 열람 PIN은 1234 입니다.', okLabel: '초기화', danger: true }).then(function (ok) {
+        confirmDlg({ title: CFG.seedDemoData ? '예시 데이터로 초기화' : '모든 데이터 삭제', message: CFG.seedDemoData ? '모든 데이터를 지우고 예시 데이터로 되돌릴까요?' : '이 브라우저의 모든 데이터(계정 포함)를 지우고 관리자 계정만 남길까요? 되돌릴 수 없습니다.', okLabel: CFG.seedDemoData ? '초기화' : '삭제', danger: true }).then(function (ok) {
           if (!ok) return;
-          store.resetDemo(); toast('예시 데이터로 초기화했습니다.'); return refresh();
+          return Promise.resolve(store.resetDemo()).then(function () { toast(CFG.seedDemoData ? '예시 데이터로 초기화했습니다.' : '모든 데이터를 지웠습니다.'); if (!store.getSession()) { window.location.replace('../index.html'); return; } return refresh(); });
         }).catch(handleError);
         break;
     }
