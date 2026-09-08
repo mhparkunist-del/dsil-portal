@@ -109,6 +109,10 @@ body.print-mode .page-body { background: #e9ecef; }
 #calendar .fc-event.fc-mine { border-width: 2px; font-weight: 600; }
 #calendar .fc-event.fc-unlogged { opacity: 0.75; }
 #calendar .fc-timegrid-slot { height: 1.6em; }
+/* 지난 시간(30분 칸이 완전히 지난 구간) 진한 회색 */
+#calendar .fc-bg-event.fc-shade-past { background: #343a40; opacity: 0.45; }
+#calendar .fc-daygrid-day .fc-bg-event.fc-shade-past { opacity: 0.2; }
+.legend-past { display: inline-block; width: 0.9rem; height: 0.9rem; border-radius: 2px; background: #343a40; opacity: 0.45; vertical-align: -2px; }
 
 .page-title { font-weight: 700; }
 

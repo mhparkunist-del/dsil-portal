@@ -25,6 +25,7 @@
     tab: 'calendar', filterEq: 'all',
     adminUnlocked: false, manager: null,
     calendar: null, calView: 'timeGridWeek', calDate: null,
+    pastTimer: null, pastEdgeAt: 0,
     editingEqId: null
   };
 
@@ -238,7 +239,7 @@
     var u = me();
     var body = '<div class="card-body"><div class="row g-4">'
       + '<div class="col-lg-8"><div class="d-flex flex-wrap gap-2 mb-3">' + chips + '</div><div id="calendar"></div>'
-      + '<div class="text-secondary small mt-2"><i class="ti ti-pointer me-1"></i>빈 시간을 드래그하면 오른쪽 예약 폼에 시간이 채워집니다. 예약 블록을 누르면 상세가 열립니다.</div></div>'
+      + '<div class="text-secondary small mt-2"><i class="ti ti-pointer me-1"></i>빈 시간을 드래그하면 오른쪽 예약 폼에 시간이 채워집니다. 예약 블록을 누르면 상세가 열립니다. <span class="legend-past ms-2 me-1"></span>지난 시간 (' + EQ.slotMinutes + '분 칸이 지나면 회색)</div></div>'
       + '<div class="col-lg-4"><h3 class="card-title mb-3"><i class="ti ti-calendar-plus me-1 text-primary"></i>예약하기</h3>';
     /* 장비가 하나도 없으면 폼 대신 안내 (빈 select 는 제출해도 브라우저 검증 말풍선만 뜸) */
     if (!active.length) {
@@ -285,11 +286,21 @@
     });
   }
 
+  /* 지난 시간 회색 처리의 경계: 30분 칸이 완전히 지났을 때만 그 칸을 지난 것으로 봄 (예: 14:20 → 14:00, 14:35 → 14:30) */
+  function pastEdge() {
+    var slot = Math.max(1, Number(EQ.slotMinutes) || 30);
+    var n = new Date();
+    n.setSeconds(0, 0);
+    n.setMinutes(Math.floor(n.getMinutes() / slot) * slot);
+    return n;
+  }
+
   function mountCalendar() {
     var el = $('#calendar');
     if (!el) return;
     if (!window.FullCalendar) { el.innerHTML = '<div class="alert alert-warning">캘린더 라이브러리를 불러오지 못했습니다. 네트워크를 확인하세요.</div>'; return; }
     if (state.calendar) { try { state.calendar.destroy(); } catch (e) { /* ignore */ } state.calendar = null; }
+    if (state.pastTimer) { clearInterval(state.pastTimer); state.pastTimer = null; }
     var cal = new FullCalendar.Calendar(el, {
       locale: 'ko',
       initialView: state.calView,
@@ -308,7 +319,15 @@
       expandRows: true,
       selectable: true,
       selectMirror: true,
-      events: calendarEvents(),
+      eventSources: [
+        { events: function (info, success) { success(calendarEvents()); } },
+        /* 지난 시간대: 보이는 범위의 시작 ~ 현재(30분 단위 내림)까지 배경으로 덮음 */
+        { events: function (info, success) {
+            var edge = pastEdge();
+            if (edge <= info.start) { success([]); return; }
+            success([{ id: 'past-shade', start: info.start, end: edge < info.end ? edge : info.end, display: 'background', overlap: true, classNames: ['fc-shade-past'] }]);
+          } }
+      ],
       select: function (info) {
         var f = $('#res-form');
         if (f && !f.start.disabled) {
@@ -327,6 +346,15 @@
     });
     cal.render();
     state.calendar = cal;
+    /* 30분 칸이 넘어가면 회색 영역을 넓힘 */
+    state.pastTimer = setInterval(function () {
+      if (!state.calendar) return;
+      var edge = pastEdge().getTime();
+      if (edge === state.pastEdgeAt) return;
+      state.pastEdgeAt = edge;
+      try { state.calendar.refetchEvents(); } catch (e) { /* ignore */ }
+    }, 30000);
+    state.pastEdgeAt = pastEdge().getTime();
   }
 
   /* 캘린더에서 끌어서 옮기거나 늘린 경우 */
