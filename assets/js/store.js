@@ -139,7 +139,7 @@
   /* 빈 데이터: migrate() 가 관리자 계정(관리자 / 0000)과 공휴일 초기값만 채움 */
   function emptyData() {
     return { accounts: [], projects: [], requests: [], reviews: [], exports: [], equipment: [], reservations: [], usageLogs: [],
-      attMembers: [], attRecords: [], attLeaves: [], attHolidays: null, invManagers: [], invItems: [], invMoves: [], security: [], participationImport: null, participationRows: [], meetingLogs: [] };
+      attMembers: [], attRecords: [], attLeaves: [], attHolidays: null, invManagers: [], invItems: [], invMoves: [], security: [], participationImport: null, participationRows: [], meetingLogs: [], dataResetId: null };
   }
 
   /* ------------------------------------------------------------------ */
@@ -395,6 +395,22 @@
     if (!data.accounts.some(function (a) { return a.role === 'admin'; })) {
       data.accounts.unshift({ id: SUPER_ADMIN.id, name: SUPER_ADMIN.name, pinHash: '', seedPin: SUPER_ADMIN.seedPin, role: 'admin', status: 'active', createdAt: nowISO(), approvedAt: nowISO(), approvedBy: '시스템' });
     }
+    /* config.dataReset: 같은 id 로는 한 번만 실행. 과제·참여연구원·장비·소모품 품목은 그대로 두고 기록만 지움 */
+    var reset = cfg.dataReset;
+    if (reset && reset.id && data.dataResetId !== reset.id) {
+      if (reset.clearLogs) {
+        data.requests = []; data.reviews = []; data.exports = [];
+        data.reservations = []; data.usageLogs = [];
+        data.meetingLogs = []; data.invMoves = []; data.security = [];
+        data.attRecords = []; data.attLeaves = [];
+        /* 소모품 품목은 남기되 이력이 사라졌으므로 재고 기준을 현재 값으로 둠 */
+      }
+      if (reset.pruneAccounts) {
+        var keep = (cfg.defaultAccounts || []).map(function (d) { return nameKey(d.name); });
+        data.accounts = data.accounts.filter(function (a) { return a.role === 'admin' || keep.indexOf(nameKey(a.name)) >= 0; });
+      }
+      data.dataResetId = reset.id;
+    }
     /* config.defaultAccounts / defaultEquipment: 이름 기준으로 없을 때만 만들어 둠 (PIN 은 ensureSeedHashes 가 해시) */
     (cfg.defaultAccounts || []).forEach(function (d) {
       if (!d || !d.name) return;
@@ -476,7 +492,9 @@
         migrate(data, cfg);
         write();
       } else {
+        var prevReset = data.dataResetId;
         migrate(data, cfg);
+        if (data.dataResetId !== prevReset) write();   /* 일회성 초기화는 바로 저장해 다시 돌지 않게 */
       }
     }
 

@@ -17,15 +17,22 @@ window.DSIL_CONFIG = {
   adminPin: '0000',
 
   /* 기본 계정 (local 모드): 처음 열 때 없으면 승인된 구성원으로 만들어 둡니다. 같은 이름이 이미 있으면 건드리지 않습니다.
-     PIN 은 저장 시 SHA-256 으로 해시되며, 각자 로그인 후 바꾸는 것을 권장합니다. */
+     참여과제 시트(assets/data/participation.js)의 인원 전체. PIN 은 저장 시 SHA-256 으로 해시되며, 각자 로그인 후 바꾸는 것을 권장합니다. */
   defaultAccounts: [
-    { name: '이현진', pin: '0000' },
-    { name: '백승훈', pin: '0000' },
-    { name: '위동진', pin: '0000' },
-    { name: '김형준', pin: '0000' },
-    { name: '음성민', pin: '0000' },
-    { name: '양희수', pin: '0000' }
+    { name: '박민호', pin: '0000' }, { name: '음성민', pin: '0000' }, { name: '이현진', pin: '0000' },
+    { name: '김형준', pin: '0000' }, { name: '백승훈', pin: '0000' }, { name: '양희수', pin: '0000' },
+    { name: '김경선', pin: '0000' }, { name: '위동진', pin: '0000' }, { name: '최서연', pin: '0000' },
+    { name: '윤진수', pin: '0000' }, { name: '한기환', pin: '0000' }, { name: '전우민', pin: '0000' },
+    { name: '이종현', pin: '0000' }, { name: '이경빈', pin: '0000' }, { name: '장시원', pin: '0000' },
+    { name: '추한조', pin: '0000' }, { name: '인유진', pin: '0000' }, { name: '정학순', pin: '0000' },
+    { name: '이용우', pin: '0000' }, { name: '조영민', pin: '0000' }, { name: '구현호', pin: '0000' },
+    { name: '조동올', pin: '0000' }
   ],
+
+  /* 일회성 데이터 초기화. id 를 바꾸면 그 브라우저에서 딱 한 번 아래 항목을 지웁니다 (과제·참여연구원·장비·소모품 품목은 유지).
+     clearLogs: 구매 요청·회의비 청구·구매 심의·내보내기 이력·장비 예약·사용 로그·회의비 처리 로그·입출고 이력·보안 이벤트
+     pruneAccounts: 관리자와 defaultAccounts 에 없는 계정 삭제 */
+  dataReset: { id: '2026-09-10-clean', clearLogs: true, pruneAccounts: true },
 
   /* 기본 장비 (local 모드): 이름이 같은 장비가 없으면 만들어 둡니다. managerPin 은 담당자 PIN, users 는 미리 등록할 사용자와 등급. */
   defaultEquipment: [
