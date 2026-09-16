@@ -498,7 +498,8 @@
       + step(1, '구매 심의 (필요 시)', '금액이 크거나 나눠 집행할 계획이면 먼저 <a href="#review" data-action="tab" data-tab="review">구매 심의</a>를 올려 과제에 가할당을 받습니다.')
       + step(2, '구매 요청 제출', '품명·비목·수량·단가를 적어 제출합니다. 미처리 상태에서는 직접 수정·취소할 수 있습니다.')
       + step(3, '관리자 배정', '관리자가 과제와 비목을 배정하면 <span class="badge bg-blue-lt">처리</span>로 바뀌고 해당 비목에서 실집행으로 차감됩니다.')
-      + step(4, '구매 후 보고서', '물품이 오면 요청 조회의 <span class="badge bg-yellow-lt">보고서 미작성</span> 배지를 눌러 영수증·거래내역·검수 사진을 첨부합니다. 50만원 초과는 검수 사진, 네이버페이는 주문 캡처가 필요합니다.')
+      + step(4, '구매 후 보고서', '물품이 오면 요청 조회의 <span class="badge bg-yellow-lt">보고서 미작성</span> 배지를 눌러 영수증·거래내역·검수 사진을 첨부하고 제출합니다. 50만원 초과는 검수 사진, 네이버페이는 주문 캡처가 필요합니다.')
+      + step(5, '검수 승인', '포닥연구원 검수자(' + esc((CFG.report && CFG.report.inspectors || []).join(', ') || '지정 필요') + ')가 <span class="badge bg-blue-lt">검수 대기</span> 건을 열어 승인하면 검수자 칸에 서명이 들어가고 <span class="badge bg-green-lt">검수 완료</span>가 됩니다.')
       + '</div>'
       + '</div></div></div>';
     return { body: body };
@@ -591,7 +592,7 @@
   }
 
   /* 구매 보고서 상태 배지 + 링크 (승인된 건만) */
-  var RSTATUS = { none: { label: '보고서 미작성', cls: 'bg-yellow-lt' }, draft: { label: '보고서 작성 중', cls: 'bg-secondary-lt' }, submitted: { label: '보고서 제출', cls: 'bg-blue-lt' }, verified: { label: '보고서 확인', cls: 'bg-green-lt' } };
+  var RSTATUS = { none: { label: '보고서 미작성', cls: 'bg-yellow-lt' }, draft: { label: '보고서 작성 중', cls: 'bg-secondary-lt' }, submitted: { label: '검수 대기', cls: 'bg-blue-lt' }, verified: { label: '검수 완료', cls: 'bg-green-lt' } };
   function reportBadge(r) {
     if (r.status !== 'done') return '';
     var st = r.report ? (r.report.status || 'draft') : 'none';

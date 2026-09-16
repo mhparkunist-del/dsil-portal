@@ -101,6 +101,11 @@
     return s.getMonth() + 1 + '/' + s.getDate() + ' ' + p(s.getHours()) + ':' + p(s.getMinutes()) + '–' + p(e.getHours()) + ':' + p(e.getMinutes());
   }
   function equipmentCfg(cfg) { return Object.assign({ maxHours: 8, logDueDays: 7 }, cfg.equipment || {}); }
+  /* 구매 보고서 검수자(포닥연구원) 명단 */
+  function reportCfg(cfg) { return Object.assign({ inspectors: [] }, (cfg && cfg.report) || {}); }
+  function isInspectorName(cfg, name) {
+    return (reportCfg(cfg).inspectors || []).some(function (n) { return nameKey(n) === nameKey(name); });
+  }
 
   /* ---------- 출석 공통 규칙 ---------- */
   var ATT_KEY = 'dsil-att-session-v1';
@@ -754,12 +759,25 @@
         return Promise.resolve(clone(rec));
       },
 
+      /* 검수: 검수자(config.report.inspectors)와 관리자만. 승인하면 검수자 이름·서명이 보고서에 박힘 */
       verifyReport: function (requestId, ok, note) {
         var err = needSession(); if (err) return Promise.reject(err);
         var r = data.requests.filter(function (x) { return x.id === requestId; })[0];
         if (!r || !r.report) return Promise.reject(new Error('제출된 보고서가 없습니다.'));
-        if (ok) { r.report.status = 'verified'; r.report.verifiedAt = nowISO(); r.report.verifiedBy = session.user.name; r.report.adminNote = String(note || '').trim(); }
-        else { r.report.status = 'draft'; r.report.adminNote = String(note || '').trim(); delete r.report.verifiedAt; delete r.report.verifiedBy; }
+        if (!session.isAdmin && !isInspectorName(cfg, session.user.name)) {
+          return Promise.reject(new Error('검수자만 승인할 수 있습니다. 검수자: ' + (reportCfg(cfg).inspectors || []).join(', ')));
+        }
+        var me = accountById(session.user.id);
+        if (ok) {
+          r.report.status = 'verified'; r.report.verifiedAt = nowISO(); r.report.verifiedBy = session.user.name; r.report.adminNote = String(note || '').trim();
+          if (r.kind !== 'meeting') {
+            r.report.inspector = session.user.name;                                  /* 실제 검수한 사람으로 확정 */
+            r.report.inspectorSignatureKey = (me && me.signatureKey) || null;         /* 서명 이미지 */
+          }
+        } else {
+          r.report.status = 'draft'; r.report.adminNote = String(note || '').trim();
+          delete r.report.verifiedAt; delete r.report.verifiedBy; delete r.report.inspectorSignatureKey;
+        }
         write(); emit();
         return Promise.resolve(clone(r.report));
       },
@@ -1642,12 +1660,22 @@
           return client.from('requests').update({ report: rec }).eq('id', requestId).select().single().then(unwrap).then(function (r) { return r.report; });
         });
       },
+      /* 검수: 검수자(config.report.inspectors)와 관리자만. 승인하면 검수자 이름·서명이 보고서에 박힘 */
       verifyReport: function (requestId, ok, note) {
-        return client.from('requests').select('report').eq('id', requestId).single().then(unwrap).then(function (row) {
+        var u = currentUser();
+        if (!u) return Promise.reject(new Error('로그인이 필요합니다.'));
+        if (!(profile && profile.is_admin) && !isInspectorName(cfg, u.name)) {
+          return Promise.reject(new Error('검수자만 승인할 수 있습니다. 검수자: ' + (reportCfg(cfg).inspectors || []).join(', ')));
+        }
+        return client.from('requests').select('report, kind').eq('id', requestId).single().then(unwrap).then(function (row) {
           var rec = row.report; if (!rec) throw new Error('제출된 보고서가 없습니다.');
-          var u = currentUser();
-          if (ok) { rec.status = 'verified'; rec.verifiedAt = new Date().toISOString(); rec.verifiedBy = u ? u.name : ''; rec.adminNote = String(note || '').trim(); }
-          else { rec.status = 'draft'; rec.adminNote = String(note || '').trim(); delete rec.verifiedAt; delete rec.verifiedBy; }
+          if (ok) {
+            rec.status = 'verified'; rec.verifiedAt = new Date().toISOString(); rec.verifiedBy = u.name; rec.adminNote = String(note || '').trim();
+            if (row.kind !== 'meeting') { rec.inspector = u.name; rec.inspectorSignatureKey = (profile && profile.signature_key) || null; }
+          } else {
+            rec.status = 'draft'; rec.adminNote = String(note || '').trim();
+            delete rec.verifiedAt; delete rec.verifiedBy; delete rec.inspectorSignatureKey;
+          }
           return client.from('requests').update({ report: rec }).eq('id', requestId).then(unwrap).then(function () { return rec; });
         });
       },

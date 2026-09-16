@@ -8,7 +8,7 @@
   'use strict';
 
   var CFG = window.DSIL_CONFIG || {};
-  var RP = Object.assign({ inspectionThreshold: 500000, centralThreshold: 5000000, minItemPhotos: 2, maxPhotoEdge: 1400, defaultAccountManager: '', defaultInspector: '' }, CFG.report || {});
+  var RP = Object.assign({ inspectionThreshold: 500000, centralThreshold: 5000000, minItemPhotos: 2, maxPhotoEdge: 1400, defaultAccountManager: '', defaultInspector: '', inspectors: [] }, CFG.report || {});
   var MCFG = Object.assign({ perPersonMax: 30000 }, CFG.meeting || {});
   var U = window.DSILUI;
   var esc = U.esc, won = U.won, nf = U.nf, pad2 = U.pad2, localDate = U.localDate, fmtDate = U.fmtDate, fmtDateTime = U.fmtDateTime, $ = U.$, toast = U.toast, readForm = U.readForm;
@@ -17,7 +17,7 @@
   var ADMIN_KEY = 'dsil-budget-admin-unlock';
   var PAY = { woori: '우리카드', shinhan: '신한카드', naverpay: '네이버페이', invoice: '세금계산서', personal: '개인 선결제', card: '법인카드' };
   var PAY_CHOICES = ['woori', 'shinhan', 'naverpay', 'invoice', 'personal'];
-  var RSTATUS = { none: { label: '보고서 미작성', cls: 'bg-yellow-lt' }, draft: { label: '작성 중', cls: 'bg-secondary-lt' }, submitted: { label: '제출됨', cls: 'bg-blue-lt' }, verified: { label: '확인 완료', cls: 'bg-green-lt' } };
+  var RSTATUS = { none: { label: '보고서 미작성', cls: 'bg-yellow-lt' }, draft: { label: '작성 중', cls: 'bg-secondary-lt' }, submitted: { label: '검수 대기', cls: 'bg-blue-lt' }, verified: { label: '검수 완료', cls: 'bg-green-lt' } };
   var SLOT_ORDER = ['receipt', 'transaction', 'items'];
 
   var state = { ready: false, error: null, session: null, id: null, print: false, request: null, project: null, form: null, photos: {}, sigs: {}, adminUnlocked: false, saving: false };
@@ -38,6 +38,11 @@
   function isAdminActive() { return isAdminEligible() && state.adminUnlocked; }
   function isOwner() { return !!(state.session && state.request && state.request.requesterId === state.session.user.id); }
   function canEdit() { var st = reportStatus(); return (isOwner() || isAdminActive()) && st !== 'verified'; }
+  /* 검수자(포닥연구원): 제출된 보고서를 승인하고 서명이 들어감 */
+  function nameKey(s) { return String(s || '').replace(/\s+/g, '').toLowerCase(); }
+  function inspectors() { return (RP.inspectors || []).filter(Boolean); }
+  function isInspector() { return !!state.session && inspectors().some(function (n) { return nameKey(n) === nameKey(state.session.user.name); }); }
+  function canVerify() { return isInspector() || isAdminActive(); }
   function reportStatus() { return state.request && state.request.report ? (state.request.report.status || 'draft') : 'none'; }
   function isMeeting() { return !!(state.request && state.request.kind === 'meeting'); }
   function today() { return localDate(new Date().toISOString()); }
@@ -61,7 +66,7 @@
     return {
       status: 'draft', kind: 'purchase', item: r.item.replace(/^회의비 · /, ''), amount: r.amount, payment: PAY[meta.payment] ? meta.payment : 'woori',
       accountManager: p.accountManager || RP.defaultAccountManager || '', cardUser: '', endUser: r.requesterName || '',
-      inspector: RP.defaultInspector || '', arrivedAt: today(), inspectedAt: today(), naverMatch: false, note: '',
+      inspector: RP.defaultInspector || (inspectors().length === 1 ? inspectors()[0] : ''), arrivedAt: today(), inspectedAt: today(), naverMatch: false, note: '',
       photos: { receipt: [], transaction: [], items: [] }
     };
   }
@@ -140,11 +145,20 @@
   function loadSignatures(form) {
     if (isMeeting()) return Promise.resolve();
     var names = [form.cardUser, form.endUser].filter(Boolean);
-    return Promise.all(names.map(function (n) {
+    var jobs = names.map(function (n) {
       if (state.sigs[n] !== undefined) return Promise.resolve();
       return store.signatureByName(n).then(function (key) { return key ? store.loadPhoto(key) : null; }).then(function (v) { state.sigs[n] = v || null; }).catch(function () { state.sigs[n] = null; });
-    }));
+    });
+    /* 검수자 서명: 승인할 때 박아 둔 키가 있으면 그것, 없으면 이름으로 조회 (검수 완료 전에는 표시하지 않음) */
+    var rep = state.request && state.request.report;
+    if (rep && rep.status === 'verified' && form.inspector) {
+      jobs.push((rep.inspectorSignatureKey ? store.loadPhoto(rep.inspectorSignatureKey)
+        : store.signatureByName(form.inspector).then(function (key) { return key ? store.loadPhoto(key) : null; }))
+        .then(function (v) { state.sigs['검수자:' + form.inspector] = v || null; }).catch(function () { state.sigs['검수자:' + form.inspector] = null; }));
+    }
+    return Promise.all(jobs);
   }
+  function inspectorSig(name) { return state.sigs['검수자:' + name] || null; }
 
   function reload() {
     state.session = store.getSession();
@@ -214,8 +228,10 @@
 
   function notesHtml(req, r, st) {
     var html = req.notes.map(function (n) { return '<div class="alert alert-' + n.cls + ' py-2 mb-2"><i class="ti ti-info-circle me-1"></i>' + esc(n.text) + '</div>'; }).join('');
-    if (r.report && r.report.adminNote && st !== 'verified') html += '<div class="alert alert-danger py-2 mb-2"><i class="ti ti-message-report me-1"></i>관리자 메모: ' + esc(r.report.adminNote) + '</div>';
-    if (st === 'verified') html += '<div class="alert alert-success py-2 mb-2"><i class="ti ti-check me-1"></i>' + esc(r.report.verifiedBy || '관리자') + ' 확인 완료 · ' + fmtDateTime(r.report.verifiedAt) + (r.report.adminNote ? ' · ' + esc(r.report.adminNote) : '') + '</div>';
+    if (r.report && r.report.adminNote && st !== 'verified') html += '<div class="alert alert-danger py-2 mb-2"><i class="ti ti-message-report me-1"></i>검수 의견: ' + esc(r.report.adminNote) + '</div>';
+    if (st === 'submitted') html += '<div class="alert alert-info py-2 mb-2"><i class="ti ti-hourglass me-1"></i>검수 대기 중입니다. 검수자(' + esc(inspectors().join(', ') || '포닥연구원') + ')가 승인하면 서명이 들어가고 보고서가 완료됩니다.' + (canVerify() ? ' <strong>지금 계정으로 승인할 수 있습니다.</strong>' : '') + '</div>';
+    if (st === 'verified') html += '<div class="alert alert-success py-2 mb-2"><i class="ti ti-check me-1"></i>' + esc(r.report.verifiedBy || '검수자') + ' 검수 완료 · ' + fmtDateTime(r.report.verifiedAt) + (r.report.adminNote ? ' · ' + esc(r.report.adminNote) : '')
+      + (!isMeeting() && !inspectorSig(r.report.inspector) ? ' <span class="text-secondary">(검수자 서명 이미지가 없어 이름만 들어갑니다. 검수자가 상단 “내 서명”에서 등록하면 다음부터 서명이 찍힙니다.)</span>' : '') + '</div>';
     return html;
   }
 
@@ -236,8 +252,8 @@
     return '<div class="card"><div class="card-body d-flex flex-wrap align-items-center gap-2">'
       + '<div class="me-auto small">' + (missing.length ? '<span class="text-yellow"><i class="ti ti-alert-triangle me-1"></i>제출 전 확인: ' + esc(missing.join(', ')) + '</span>' : '<span class="text-green"><i class="ti ti-check me-1"></i>필수 항목이 모두 채워졌습니다</span>') + (r.report && r.report.updatedAt ? '<div class="text-secondary">마지막 저장 ' + fmtDateTime(r.report.updatedAt) + (r.report.updatedBy ? ' · ' + esc(r.report.updatedBy) : '') + '</div>' : '') + '</div>'
       + (editable ? '<button type="button" class="btn" data-action="save-draft"><i class="ti ti-device-floppy me-1"></i>임시 저장</button><button type="button" class="btn btn-primary" data-action="submit"' + (missing.length ? ' disabled' : '') + '><i class="ti ti-send me-1"></i>' + (st === 'submitted' ? '다시 제출' : '제출') + '</button>' : '')
-      + (isAdminActive() && st === 'submitted' ? '<button type="button" class="btn btn-outline-danger" data-action="return"><i class="ti ti-arrow-back-up me-1"></i>보완 요청</button><button type="button" class="btn btn-success" data-action="verify"><i class="ti ti-check me-1"></i>확인 완료</button>' : '')
-      + (isAdminActive() && st === 'verified' ? '<button type="button" class="btn btn-outline-secondary" data-action="return"><i class="ti ti-arrow-back-up me-1"></i>확인 취소</button>' : '')
+      + (canVerify() && st === 'submitted' ? '<button type="button" class="btn btn-outline-danger" data-action="return"><i class="ti ti-arrow-back-up me-1"></i>보완 요청</button><button type="button" class="btn btn-success" data-action="verify"><i class="ti ti-signature me-1"></i>' + (isMeeting() ? '검수 승인' : '검수 승인 (서명)') + '</button>' : '')
+      + (canVerify() && st === 'verified' ? '<button type="button" class="btn btn-outline-secondary" data-action="return"><i class="ti ti-arrow-back-up me-1"></i>검수 취소</button>' : '')
       + '</div></div>';
   }
 
@@ -271,7 +287,11 @@
       + '<div class="col-md-4"><label class="form-label required">실구매자 (물품사용자) <span class="form-label-description">실제 사용자</span></label>' + personSelect('endUser', f.endUser, cardUsers) + '</div>'
       + '<div class="col-md-3"><label class="form-label">물품 도착일</label><input type="date" class="form-control" name="arrivedAt" value="' + esc(f.arrivedAt || '') + '" data-role="arrived"></div>'
       + '<div class="col-md-3"><label class="form-label required">검수일자 <span class="form-label-description">도착일 = 작성일 원칙</span></label><input type="date" class="form-control" name="inspectedAt" required value="' + esc(f.inspectedAt || '') + '"></div>'
-      + '<div class="col-md-3"><label class="form-label required">검수자</label><input type="text" class="form-control" name="inspector" required value="' + esc(f.inspector) + '"></div>'
+      + '<div class="col-md-3"><label class="form-label required">검수자 <span class="form-label-description">포닥연구원</span></label>'
+      + (inspectors().length
+        ? '<select class="form-select" name="inspector" required><option value="">선택…</option>' + inspectors().map(function (n) { return '<option value="' + esc(n) + '"' + (nameKey(n) === nameKey(f.inspector) ? ' selected' : '') + '>' + esc(n) + '</option>'; }).join('')
+          + (f.inspector && !inspectors().some(function (n) { return nameKey(n) === nameKey(f.inspector); }) ? '<option value="' + esc(f.inspector) + '" selected>' + esc(f.inspector) + '</option>' : '') + '</select>'
+        : '<input type="text" class="form-control" name="inspector" required value="' + esc(f.inspector) + '">') + '</div>'
       + '<div class="col-md-3"><label class="form-label">비고</label><input type="text" class="form-control" name="note" value="' + esc(f.note || '') + '"></div>'
       + (f.payment === 'naverpay' ? '<div class="col-12"><label class="form-check"><input class="form-check-input" type="checkbox" name="naverMatch"' + (f.naverMatch ? ' checked' : '') + '><span class="form-check-label">네이버 주문 상세의 결제금액(배송비 포함)과 카드 영수증 합계가 일치함을 확인했습니다.</span></label></div>' : '')
       + '</div></fieldset></form></div></div>';
@@ -351,7 +371,7 @@
       + '<h3>▶ 기타 정보</h3>'
       + '<table class="rp-table"><tr><th>구매내역</th><td>' + esc(f.item) + '</td><th>계정책임자</th><td>' + esc(f.accountManager) + '</td><th>계정</th><td>' + esc(p.name || '') + (p.code ? '<br>' + esc(p.code) : '') + '</td></tr>'
       + '<tr><th>금 액</th><td class="tnum">￦' + nf.format(Number(f.amount) || 0) + '원</td><th>카드실사용자<br>(결제자)</th><td>' + esc(f.cardUser) + sigImg(f.cardUser) + '</td><th>실구매자<br>(물품사용자)</th><td>' + esc(f.endUser) + sigImg(f.endUser) + '</td></tr>'
-      + '<tr><th>검수일자</th><td>' + esc(dotDate(f.inspectedAt)) + '</td><th>검수자</th><td>' + esc(f.inspector) + '</td><td colspan="2" class="rp-muted">' + esc(PAY[f.payment] || '') + (f.note ? ' · ' + esc(f.note) : '') + '</td></tr></table>'
+      + '<tr><th>검수일자</th><td>' + esc(dotDate(f.inspectedAt)) + '</td><th>검수자</th><td>' + esc(f.inspector) + (inspectorSig(f.inspector) ? '<img src="' + esc(inspectorSig(f.inspector)) + '" alt="" class="sig">' : '') + '</td><td colspan="2" class="rp-muted">' + esc(PAY[f.payment] || '') + (f.note ? ' · ' + esc(f.note) : '') + '</td></tr></table>'
       + '<div class="rp-foot">' + esc(receiptLabel) + ' · ' + esc(txLabel) + (req.tier !== 'none' ? ' · 물품 사진 ' + photoCount(f, 'items') + '장' : '') + '</div>'
       + '</section>'
       + (f.photos.items || []).map(function (k) { return state.photos[k] ? '<section class="rp-page rp-photo"><h3>▶ 사진</h3><div class="rp-photo-wrap"><img src="' + esc(state.photos[k]) + '" alt=""></div></section>' : ''; }).join('');
@@ -424,12 +444,13 @@
       build = addSlot('▶ 영수증', 'receipt', BIG).then(function () { return addSlot('▶ 거래내역', 'transaction', BIG); }).then(function () {
         body.push(docxParagraph('▶ 기타 정보', { bold: true, size: 26 }));
         var sigCell = function (name) { var v = state.sigs[name]; return v ? addImage(v, 900000, 360000) : Promise.resolve(''); };
-        return Promise.all([sigCell(f.cardUser), sigCell(f.endUser)]).then(function (sigs) {
+        var inspCell = function () { var v = inspectorSig(f.inspector); return v ? addImage(v, 900000, 360000) : Promise.resolve(''); };
+        return Promise.all([sigCell(f.cardUser), sigCell(f.endUser), inspCell()]).then(function (sigs) {
           var W = [1300, 2000, 1400, 1500, 1400, 2800];
           body.push(docxTable(W,
             '<w:tr>' + docxCell('구매내역', { w: W[0], bold: true, shade: true, center: true }) + docxCell(f.item, { w: W[1] }) + docxCell('계정책임자', { w: W[2], bold: true, shade: true, center: true }) + docxCell(f.accountManager, { w: W[3], center: true }) + docxCell('계정', { w: W[4], bold: true, shade: true, center: true }) + docxCell((p.name || '') + (p.code ? '\n' + p.code : ''), { w: W[5] }) + '</w:tr>'
             + '<w:tr>' + docxCell('금 액', { w: W[0], bold: true, shade: true, center: true }) + docxCell('￦' + nf.format(Number(f.amount) || 0) + '원', { w: W[1] }) + docxCell('카드실사용자\n(결제자)', { w: W[2], bold: true, shade: true, center: true }) + docxCell(f.cardUser, { w: W[3], center: true, extra: sigs[0] }) + docxCell('실구매자\n(물품사용자)', { w: W[4], bold: true, shade: true, center: true }) + docxCell(f.endUser, { w: W[5], center: true, extra: sigs[1] }) + '</w:tr>'
-            + '<w:tr>' + docxCell('검수일자', { w: W[0], bold: true, shade: true, center: true }) + docxCell(dotDate(f.inspectedAt), { w: W[1] }) + docxCell('검수자', { w: W[2], bold: true, shade: true, center: true }) + docxCell(f.inspector, { w: W[3], center: true }) + docxCell((PAY[f.payment] || '') + (f.note ? ' · ' + f.note : ''), { w: W[4] + W[5], span: 2 }) + '</w:tr>'));
+            + '<w:tr>' + docxCell('검수일자', { w: W[0], bold: true, shade: true, center: true }) + docxCell(dotDate(f.inspectedAt), { w: W[1] }) + docxCell('검수자', { w: W[2], bold: true, shade: true, center: true }) + docxCell(f.inspector, { w: W[3], center: true, extra: sigs[2] }) + docxCell((PAY[f.payment] || '') + (f.note ? ' · ' + f.note : ''), { w: W[4] + W[5], span: 2 }) + '</w:tr>'));
           body.push(docxParagraph(''));
           var items = f.photos.items || [];
           return items.reduce(function (pr, k) {
@@ -558,12 +579,20 @@
       case 'submit': {
         var missing = validate(collectForm());
         if (missing.length) { toast('부족한 항목: ' + missing.join(', '), true); return; }
-        persist('submitted').then(function () { return meetingLog('minutes', '회의록 제출 · 영수증 ' + photoCount(state.form, 'receipt') + '장'); }).then(function () { toast(isMeeting() ? '회의록을 제출했습니다. 인쇄용 또는 DOCX 로 내려받아 정산에 쓰세요.' : '보고서를 제출했습니다. 관리자 확인 후 상태가 바뀝니다.'); }).catch(handleError);
+        persist('submitted').then(function () { return meetingLog('minutes', '회의록 제출 · 영수증 ' + photoCount(state.form, 'receipt') + '장'); }).then(function () { toast(isMeeting() ? '회의록을 제출했습니다. 인쇄용 또는 DOCX 로 내려받아 정산에 쓰세요.' : '검수를 요청했습니다. 검수자(' + (inspectors().join(', ') || '포닥연구원') + ')가 승인하면 완료됩니다.'); }).catch(handleError);
         break;
       }
-      case 'verify':
-        confirmDlg({ title: '보고서 확인', message: '첨부와 내용을 확인했고 정산 서류로 넘겨도 되는 상태인가요?', okLabel: '확인 완료' }).then(function (ok) { if (!ok) return; return store.verifyReport(state.id, true, '').then(function () { return meetingLog('minutes-verify', '관리자 확인 완료'); }).then(function () { toast('확인 완료로 표시했습니다.'); return refresh(); }); }).catch(handleError);
+      case 'verify': {
+        confirmDlg({
+          title: isMeeting() ? '회의록 검수' : '구매 보고서 검수',
+          message: '영수증과 내용을 확인했나요? 승인하면 검수자 칸에 ' + (state.session ? state.session.user.name : '') + ' 이름과 등록된 서명이 들어가고 보고서가 완료됩니다.',
+          okLabel: '승인'
+        }).then(function (ok) {
+          if (!ok) return;
+          return store.verifyReport(state.id, true, '').then(function () { return meetingLog('minutes-verify', '검수 승인'); }).then(function () { toast('검수 승인했습니다.'); return refresh(); });
+        }).catch(handleError);
         break;
+      }
       case 'return':
         promptDlg({ title: '보완 요청', message: '작성자에게 전달할 내용을 적어 주세요. 보고서는 작성 중 상태로 돌아갑니다.', input: 'textarea', placeholder: '예: 영수증 승인 금액이 보이지 않습니다', okLabel: '보완 요청', danger: true }).then(function (note) { if (note === null) return; return store.verifyReport(state.id, false, note).then(function () { return meetingLog('minutes-return', String(note || '').trim()); }).then(function () { toast('작성자에게 보완을 요청했습니다.'); return refresh(); }); }).catch(handleError);
         break;
