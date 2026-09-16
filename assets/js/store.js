@@ -403,13 +403,19 @@
     /* config.dataReset: 같은 id 로는 한 번만 실행. 과제·참여연구원·장비·소모품 품목은 그대로 두고 기록만 지움 */
     var reset = cfg.dataReset;
     if (reset && reset.id && data.dataResetId !== reset.id) {
-      if (reset.clearLogs) {
-        data.requests = []; data.reviews = []; data.exports = [];
-        data.reservations = []; data.usageLogs = [];
-        data.meetingLogs = []; data.invMoves = []; data.security = [];
-        data.attRecords = []; data.attLeaves = [];
-        /* 소모품 품목은 남기되 이력이 사라졌으므로 재고 기준을 현재 값으로 둠 */
+      var all = !!reset.clearLogs;                       /* 예전 방식: 전부 지움 */
+      if (all || reset.clearRequests) {
+        /* 보고서(구매·회의록)는 requests 안에 들어 있으므로 함께 지워짐. 붙어 있던 사진 키는 따로 모아 두었다가 지움 (서명 이미지는 보존) */
+        (data.requests || []).forEach(function (r) {
+          var ph = r.report && r.report.photos;
+          if (!ph) return;
+          Object.keys(ph).forEach(function (slot) { (ph[slot] || []).forEach(function (k) { if (k) pendingPhotoPurge.push(k); }); });
+        });
+        data.requests = []; data.reviews = []; data.exports = []; data.meetingLogs = [];
       }
+      if (all || reset.clearEquipment) { data.reservations = []; data.usageLogs = []; }
+      if (all || reset.clearInventory) { data.invItems = []; data.invMoves = []; }
+      if (all || reset.clearSecurity) { data.security = []; data.attRecords = []; data.attLeaves = []; }
       if (reset.pruneAccounts) {
         var keep = (cfg.defaultAccounts || []).map(function (d) { return nameKey(d.name); });
         data.accounts = data.accounts.filter(function (a) { return a.role === 'admin' || keep.indexOf(nameKey(a.name)) >= 0; });
@@ -453,6 +459,13 @@
   }
   function idbGet(key) {
     return idb().then(function (db) { return new Promise(function (resolve, reject) { var tx = db.transaction(IDB_STORE, 'readonly'); var rq = tx.objectStore(IDB_STORE).get(key); rq.onsuccess = function () { resolve(rq.result || null); }; rq.onerror = function () { reject(rq.error); }; }); });
+  }
+  /* 일회성 초기화로 지워진 보고서의 사진 키 (서명 이미지는 여기에 들어가지 않음) */
+  var pendingPhotoPurge = [];
+  function purgePhotos() {
+    var keys = pendingPhotoPurge.slice();
+    pendingPhotoPurge = [];
+    keys.forEach(function (k) { idbDelete(k).catch(function () {}); });
   }
   function idbDelete(key) {
     return idb().then(function (db) { return new Promise(function (resolve, reject) { var tx = db.transaction(IDB_STORE, 'readwrite'); tx.objectStore(IDB_STORE).delete(key); tx.oncomplete = function () { resolve(); }; tx.onerror = function () { reject(tx.error); }; }); });
@@ -499,7 +512,10 @@
       } else {
         var prevReset = data.dataResetId;
         migrate(data, cfg);
-        if (data.dataResetId !== prevReset) write();   /* 일회성 초기화는 바로 저장해 다시 돌지 않게 */
+        if (data.dataResetId !== prevReset) {
+          write();       /* 일회성 초기화는 바로 저장해 다시 돌지 않게 */
+          purgePhotos(); /* 지운 보고서에 붙어 있던 사진 정리 (서명은 그대로 둠) */
+        }
       }
     }
 

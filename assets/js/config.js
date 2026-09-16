@@ -29,10 +29,14 @@ window.DSIL_CONFIG = {
     { name: '조동올', pin: '0000' }
   ],
 
-  /* 일회성 데이터 초기화. id 를 바꾸면 그 브라우저에서 딱 한 번 아래 항목을 지웁니다 (과제·참여연구원·장비·소모품 품목은 유지).
-     clearLogs: 구매 요청·회의비 청구·구매 심의·내보내기 이력·장비 예약·사용 로그·회의비 처리 로그·입출고 이력·보안 이벤트
-     pruneAccounts: 관리자와 defaultAccounts 에 없는 계정 삭제 */
-  dataReset: { id: '2026-09-10-clean', clearLogs: true, pruneAccounts: true },
+  /* 일회성 데이터 초기화. id 를 바꾸면 그 브라우저에서 딱 한 번 아래 항목을 지웁니다. 과제·참여연구원·장비·계정·서명은 항상 유지.
+     clearRequests  : 구매 요청·구매 보고서·회의비 청구·회의록·구매 심의·내보내기 이력·회의비 처리 로그 (보고서 사진도 함께 삭제)
+     clearEquipment : 장비 예약과 사용 로그
+     clearInventory : 소모품 품목과 입출고 이력 (담당자 지정은 유지)
+     clearSecurity  : 보안 이벤트·출석 기록
+     pruneAccounts  : 관리자와 defaultAccounts 에 없는 계정 삭제
+     clearLogs      : 위 전부 (예전 초기화에서 쓰던 방식) */
+  dataReset: { id: '2026-09-16-clean', clearRequests: true, clearInventory: true, clearSecurity: true, pruneAccounts: false },
 
   /* 기본 장비 (local 모드): 이름이 같은 장비가 없으면 만들어 둡니다. managerPin 은 담당자 PIN, users 는 미리 등록할 사용자와 등급. */
   defaultEquipment: [
