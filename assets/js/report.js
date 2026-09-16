@@ -11,7 +11,7 @@
   var RP = Object.assign({ inspectionThreshold: 500000, centralThreshold: 5000000, minItemPhotos: 2, maxPhotoEdge: 1400, defaultAccountManager: '', defaultInspector: '', inspectors: [] }, CFG.report || {});
   var MCFG = Object.assign({ perPersonMax: 30000 }, CFG.meeting || {});
   var U = window.DSILUI;
-  var esc = U.esc, won = U.won, nf = U.nf, pad2 = U.pad2, localDate = U.localDate, fmtDate = U.fmtDate, fmtDateTime = U.fmtDateTime, $ = U.$, toast = U.toast, readForm = U.readForm;
+  var esc = U.esc, won = U.won, nf = U.nf, pad2 = U.pad2, localDate = U.localDate, fmtDate = U.fmtDate, fmtDateTime = U.fmtDateTime, $ = U.$, $all = U.$all, toast = U.toast, readForm = U.readForm;
   var dialog = U.dialog, confirmDlg = U.confirmDlg, promptDlg = U.promptDlg, empty = U.empty, dg = U.dg;
   var store = window.DSILStore.create(CFG);
   var ADMIN_KEY = 'dsil-budget-admin-unlock';
@@ -37,12 +37,20 @@
   function isAdminEligible() { return !!(state.session && state.session.isAdmin); }
   function isAdminActive() { return isAdminEligible() && state.adminUnlocked; }
   function isOwner() { return !!(state.session && state.request && state.request.requesterId === state.session.user.id); }
-  function canEdit() { var st = reportStatus(); return (isOwner() || isAdminActive()) && st !== 'verified'; }
+  /* 편집: 작성자 본인 또는 관리자 계정(PIN 없이도). 검수 완료 뒤에는 잠김 */
+  function canEdit() { var st = reportStatus(); return (isOwner() || isAdminEligible()) && st !== 'verified'; }
+  /* 읽기 전용인 이유를 화면에 알려줌 */
+  function readOnlyReason() {
+    var st = reportStatus();
+    if (st === 'verified') return '검수가 끝난 보고서라 잠겨 있습니다. 고치려면 검수자나 관리자가 검수 취소를 눌러야 합니다.';
+    if (!isOwner() && !isAdminEligible()) return '이 보고서는 작성자(' + (state.request ? state.request.requesterName : '') + ') 본인과 관리자만 수정할 수 있습니다. ' + (isInspector() ? '검수자는 내용을 확인한 뒤 아래에서 승인 또는 보완 요청만 할 수 있습니다.' : '');
+    return '';
+  }
   /* 검수자(포닥연구원): 제출된 보고서를 승인하고 서명이 들어감 */
   function nameKey(s) { return String(s || '').replace(/\s+/g, '').toLowerCase(); }
   function inspectors() { return (RP.inspectors || []).filter(Boolean); }
   function isInspector() { return !!state.session && inspectors().some(function (n) { return nameKey(n) === nameKey(state.session.user.name); }); }
-  function canVerify() { return isInspector() || isAdminActive(); }
+  function canVerify() { return isInspector() || isAdminEligible(); }
   function reportStatus() { return state.request && state.request.report ? (state.request.report.status || 'draft') : 'none'; }
   function isMeeting() { return !!(state.request && state.request.kind === 'meeting'); }
   function today() { return localDate(new Date().toISOString()); }
@@ -109,31 +117,51 @@
 
   function photoCount(form, key) { return (form.photos && form.photos[key] ? form.photos[key] : []).length; }
 
-  function validate(form) {
+  /* 빠진 항목 목록. 각 항목은 { label, field } — field 는 폼 입력 name 또는 'photo:<슬롯>' */
+  function missingItems(form) {
     var req = requirements(form);
-    var missing = [];
+    var out = [];
+    function need(cond, label, field) { if (cond) out.push({ label: label, field: field }); }
     if (isMeeting()) {
-      if (!form.meetingDate) missing.push('회의일자');
-      if (!String(form.payTime || '').trim()) missing.push('결제시간');
-      if (!String(form.title || '').trim()) missing.push('회의명');
-      if (!String(form.content || '').trim()) missing.push('회의내용');
-      if (!String(form.place || '').trim()) missing.push('회의장소');
+      need(!form.meetingDate, '회의일자', 'meetingDate');
+      need(!String(form.payTime || '').trim(), '결제시간', 'payTime');
+      need(!String(form.title || '').trim(), '회의명', 'title');
+      need(!String(form.content || '').trim(), '회의내용', 'content');
+      need(!String(form.place || '').trim(), '회의장소', 'place');
       var n = attendeeCount(form.attendees);
-      if (!n) missing.push('참석자');
-      if (!String(form.account || '').trim()) missing.push('계정 (과제번호)');
-      if (!(Number(form.amount) > 0)) missing.push('사용금액');
-      if (n && (Number(form.amount) || 0) / n > MCFG.perPersonMax) missing.push('1인당 ' + won(MCFG.perPersonMax) + ' 이하 (참석자 추가)');
+      need(!n, '참석자', 'attendees');
+      need(!String(form.account || '').trim(), '계정 (과제번호)', 'account');
+      need(!(Number(form.amount) > 0), '사용금액', 'amount');
+      need(!!n && (Number(form.amount) || 0) / n > MCFG.perPersonMax, '1인당 ' + won(MCFG.perPersonMax) + ' 이하 (참석자 추가)', 'attendees');
     } else {
-      if (!String(form.item || '').trim()) missing.push('구매내역');
-      if (!(Number(form.amount) > 0)) missing.push('금액');
-      if (!String(form.cardUser || '').trim()) missing.push('카드실사용자');
-      if (!String(form.endUser || '').trim()) missing.push('실구매자(물품사용자)');
-      if (!form.inspectedAt) missing.push('검수일자');
-      if (!String(form.inspector || '').trim()) missing.push('검수자');
-      if (form.payment === 'naverpay' && !form.naverMatch) missing.push('네이버 주문 금액과 영수증 합계 일치 확인');
+      need(!String(form.item || '').trim(), '구매내역', 'item');
+      need(!(Number(form.amount) > 0), '금액', 'amount');
+      need(!String(form.cardUser || '').trim(), '카드실사용자', 'cardUser_sel');
+      need(!String(form.endUser || '').trim(), '실구매자(물품사용자)', 'endUser_sel');
+      need(!form.inspectedAt, '검수일자', 'inspectedAt');
+      need(!String(form.inspector || '').trim(), '검수자 (포닥연구원 선택)', 'inspector');
+      need(form.payment === 'naverpay' && !form.naverMatch, '네이버 주문 금액과 영수증 합계 일치 확인', 'naverMatch');
     }
-    req.slots.forEach(function (s) { if (photoCount(form, s.key) < s.min) missing.push(s.label + ' ' + s.min + '장 이상'); });
-    return missing;
+    req.slots.forEach(function (s) { if (photoCount(form, s.key) < s.min) out.push({ label: s.label + ' ' + s.min + '장 이상', field: 'photo:' + s.key }); });
+    return out;
+  }
+  function validate(form) { return missingItems(form).map(function (m) { return m.label; }); }
+
+  /* 빠진 항목에 빨간 테두리를 주고 첫 항목으로 스크롤 */
+  function highlightMissing(items) {
+    $all('#app .is-invalid').forEach(function (el) { el.classList.remove('is-invalid'); });
+    $all('#app .missing-slot').forEach(function (el) { el.classList.remove('missing-slot'); });
+    var first = null;
+    items.forEach(function (m) {
+      var el = null;
+      if (m.field.indexOf('photo:') === 0) el = document.querySelector('[data-slot="' + m.field.slice(6) + '"]');
+      else { var form = $('#report-form'); el = form ? form.querySelector('[name="' + m.field + '"]') : null; }
+      if (!el) return;
+      var target = m.field.indexOf('photo:') === 0 ? el.closest('.mb-4') : el;
+      if (target) { target.classList.add(m.field.indexOf('photo:') === 0 ? 'missing-slot' : 'is-invalid'); if (!first) first = target; }
+    });
+    if (first && first.scrollIntoView) first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (first && first.focus && first.tagName !== 'DIV') { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } }
   }
 
   /* ---------- data ---------- */
@@ -227,7 +255,10 @@
   }
 
   function notesHtml(req, r, st) {
-    var html = req.notes.map(function (n) { return '<div class="alert alert-' + n.cls + ' py-2 mb-2"><i class="ti ti-info-circle me-1"></i>' + esc(n.text) + '</div>'; }).join('');
+    var html = '';
+    var ro = readOnlyReason();
+    if (ro && !canEdit()) html += '<div class="alert alert-warning py-2 mb-2"><i class="ti ti-lock me-1"></i>' + esc(ro) + '</div>';
+    html += req.notes.map(function (n) { return '<div class="alert alert-' + n.cls + ' py-2 mb-2"><i class="ti ti-info-circle me-1"></i>' + esc(n.text) + '</div>'; }).join('');
     if (r.report && r.report.adminNote && st !== 'verified') html += '<div class="alert alert-danger py-2 mb-2"><i class="ti ti-message-report me-1"></i>검수 의견: ' + esc(r.report.adminNote) + '</div>';
     if (st === 'submitted') html += '<div class="alert alert-info py-2 mb-2"><i class="ti ti-hourglass me-1"></i>검수 대기 중입니다. 검수자(' + esc(inspectors().join(', ') || '포닥연구원') + ')가 승인하면 서명이 들어가고 보고서가 완료됩니다.' + (canVerify() ? ' <strong>지금 계정으로 승인할 수 있습니다.</strong>' : '') + '</div>';
     if (st === 'verified') html += '<div class="alert alert-success py-2 mb-2"><i class="ti ti-check me-1"></i>' + esc(r.report.verifiedBy || '검수자') + ' 검수 완료 · ' + fmtDateTime(r.report.verifiedAt) + (r.report.adminNote ? ' · ' + esc(r.report.adminNote) : '')
@@ -251,7 +282,7 @@
     var missing = validate(f);
     return '<div class="card"><div class="card-body d-flex flex-wrap align-items-center gap-2">'
       + '<div class="me-auto small">' + (missing.length ? '<span class="text-yellow"><i class="ti ti-alert-triangle me-1"></i>제출 전 확인: ' + esc(missing.join(', ')) + '</span>' : '<span class="text-green"><i class="ti ti-check me-1"></i>필수 항목이 모두 채워졌습니다</span>') + (r.report && r.report.updatedAt ? '<div class="text-secondary">마지막 저장 ' + fmtDateTime(r.report.updatedAt) + (r.report.updatedBy ? ' · ' + esc(r.report.updatedBy) : '') + '</div>' : '') + '</div>'
-      + (editable ? '<button type="button" class="btn" data-action="save-draft"><i class="ti ti-device-floppy me-1"></i>임시 저장</button><button type="button" class="btn btn-primary" data-action="submit"' + (missing.length ? ' disabled' : '') + '><i class="ti ti-send me-1"></i>' + (st === 'submitted' ? '다시 제출' : '제출') + '</button>' : '')
+      + (editable ? '<button type="button" class="btn" data-action="save-draft"><i class="ti ti-device-floppy me-1"></i>임시 저장</button><button type="button" class="btn btn-primary" data-action="submit"><i class="ti ti-send me-1"></i>' + (st === 'submitted' ? '다시 제출' : (isMeeting() ? '제출' : '검수 요청')) + '</button>' : '')
       + (canVerify() && st === 'submitted' ? '<button type="button" class="btn btn-outline-danger" data-action="return"><i class="ti ti-arrow-back-up me-1"></i>보완 요청</button><button type="button" class="btn btn-success" data-action="verify"><i class="ti ti-signature me-1"></i>' + (isMeeting() ? '검수 승인' : '검수 승인 (서명)') + '</button>' : '')
       + (canVerify() && st === 'verified' ? '<button type="button" class="btn btn-outline-secondary" data-action="return"><i class="ti ti-arrow-back-up me-1"></i>검수 취소</button>' : '')
       + '</div></div>';
@@ -577,8 +608,12 @@
       case 'unlock-admin': enterAdmin(); break;
       case 'save-draft': persist(reportStatus() === 'submitted' ? 'submitted' : 'draft').then(function () { toast('임시 저장했습니다.'); }).catch(handleError); break;
       case 'submit': {
-        var missing = validate(collectForm());
-        if (missing.length) { toast('부족한 항목: ' + missing.join(', '), true); return; }
+        var miss = missingItems(collectForm());
+        if (miss.length) {
+          toast('아직 비어 있습니다: ' + miss.map(function (m) { return m.label; }).join(', '), true);
+          highlightMissing(miss);
+          return;
+        }
         persist('submitted').then(function () { return meetingLog('minutes', '회의록 제출 · 영수증 ' + photoCount(state.form, 'receipt') + '장'); }).then(function () { toast(isMeeting() ? '회의록을 제출했습니다. 인쇄용 또는 DOCX 로 내려받아 정산에 쓰세요.' : '검수를 요청했습니다. 검수자(' + (inspectors().join(', ') || '포닥연구원') + ')가 승인하면 완료됩니다.'); }).catch(handleError);
         break;
       }

@@ -84,6 +84,8 @@ html { color-scheme: light; }
 .rp-minutes td { text-align: left; }
 .rp-star { font-weight: 700; margin: 6mm 0 3mm; }
 .rp-chip { display: inline-flex; align-items: center; gap: .35rem; }
+/* 보고서 제출 시 빠진 사진 칸 강조 */
+.missing-slot { outline: 2px solid var(--tblr-danger); outline-offset: 6px; border-radius: 6px; }
 .rp-photo .rp-photo-wrap { height: 252mm; display: flex; align-items: center; justify-content: center; }
 .rp-photo img { width: 100%; height: 100%; object-fit: contain; }
 body.print-mode .page-body { background: #e9ecef; }
