@@ -33,6 +33,7 @@ window.DSIL_CONFIG = {
      clearRequests  : 구매 요청·구매 보고서·회의비 청구·회의록·구매 심의·내보내기 이력·회의비 처리 로그 (보고서 사진도 함께 삭제)
      clearEquipment : 장비 예약과 사용 로그
      clearInventory : 소모품 품목과 입출고 이력 (담당자 지정은 유지)
+     clearAcquisitions : 장비 도입 건과 변경 이력 (중간 담당자 지정은 유지)
      clearSecurity  : 보안 이벤트·출석 기록
      pruneAccounts  : 관리자와 defaultAccounts 에 없는 계정 삭제
      clearLogs      : 위 전부 (예전 초기화에서 쓰던 방식) */
@@ -45,14 +46,35 @@ window.DSIL_CONFIG = {
   /* PIN 을 맞힌 뒤 관리자 잠금이 유지되는 시간(분). 지나면 다시 묻습니다. */
   adminUnlockMinutes: 10,
 
-  /* 과제 예산 비목. id 는 저장 키이므로 운영 중에 바꾸지 마세요. label 은 자유롭게 수정 가능. */
+  /* 과제 예산 비목. id 는 저장 키이므로 운영 중에 바꾸지 마세요. label 은 자유롭게 수정 가능.
+     pool 이 없는 비목이 행정 연구비 현황의 세목(연구재료비·연구활동비·연구시설·장비비)이고,
+     pool 이 있는 비목은 그 세목에서 차감됩니다 (회의비 → 연구활동비). */
   budgetCategories: [
-    { id: 'material',  label: '재료비' },
+    { id: 'material',  label: '연구재료비' },
     { id: 'activity',  label: '연구활동비' },
-    { id: 'equipment', label: '장비구매비' },
-    { id: 'meeting',   label: '회의비' },
-    { id: 'other',     label: '기타' }
+    { id: 'equipment', label: '연구시설·장비비' },
+    { id: 'meeting',   label: '회의비', pool: 'activity' },
+    { id: 'other',     label: '기타', pool: 'material' }
   ],
+
+  /* 과제 예산 (관리자 전용). 금액은 이 파일에 넣지 않습니다 (공개 저장소).
+     관리자가 구매 요청 > 관리자 탭에서 행정 연구비 현황 엑셀을 올리면 그 브라우저(공용 DB 모드에서는 DB)에만 저장됩니다. */
+  budget: {
+    refreshDays: 14,            /* 행정 현황 갱신 주기(일). 기준일이 이보다 오래되면 갱신 안내 */
+    mustSpendDays: 120,         /* 종료일까지 이 일수 이하로 남으면 '종료 임박' */
+    recentCheckDays: 7,         /* 기준일 직전 이 기간에 처리한 건은 행정 잔액 반영 여부 확인 대상으로 표시 */
+    /* 예산 관리·배정에서 빼는 과제 (참여과제 시트 약칭 또는 엑셀 구분) */
+    excludeAliases: ['개인과제', '이노코어', '성장형포스닥', '기본과제'],
+    /* 엑셀 '구분' → 참여과제 시트 약칭. 같은 이름이면 적지 않아도 됩니다 */
+    aliasMap: {
+      '차세대지능형반도체': '차지반',
+      'K-Chips 정부': 'K-chips(정)',
+      'K-Chips 민간': 'K-chips(민)',
+      '연구개발특구': '개발특구',
+      'AI Science Hub': 'AI사이언스허브',
+      'AIP 위탁 IITP': 'IITP'
+    }
+  },
 
   /* 구매 절차 기준 (KAIST). 금액이 upTo 이하이면 해당 단계, null 은 상한 없음. 위에서부터 차례로 판정. */
   procurementTiers: [
@@ -124,6 +146,34 @@ window.DSIL_CONFIG = {
     /* 알림 웹훅(Discord 또는 Slack incoming webhook URL). 비우면 포털 관리자 화면의 보안 이벤트에만 남습니다.
        이 파일은 공개 저장소에 올라가므로 웹훅 주소가 노출됩니다. 노출이 싫으면 공용 DB 모드에서 DB 트리거 알림을 쓰세요. */
     alertWebhookUrl: ''
+  },
+
+  /* 장비 도입 (구매 계획·입찰·결제·유틸리티·배치)
+     중간 담당자: 신청을 확인·등록하고 장비 구매 담당자와 그 건의 비밀번호를 정함 (로그인 이름 + 중간 담당자 PIN)
+     구매 담당자: 로그인 후 그 건의 비밀번호로 진행 상황을 갱신. 모든 변경은 관리자만 보는 이력에 남음
+     예산: 관리자가 승인한 결제 항목만 과제 예산에 반영 (구매 완료 전 가할당, 구매 완료 후 실집행)
+     stages·utilities 의 id 는 저장 키이므로 운영 중에 바꾸지 마세요. label 은 자유롭게 수정 가능. */
+  equipmentAcquisition: {
+    stages: [
+      { id: 'plan',       label: '장비 도입 계획', cls: 'bg-secondary-lt' },
+      { id: 'bid_doc',    label: '입찰서 작성',    cls: 'bg-azure-lt',  bid: true },
+      { id: 'bid_before', label: '입찰 전',        cls: 'bg-blue-lt',   bid: true },
+      { id: 'bid_failed', label: '유찰',           cls: 'bg-orange-lt', bid: true },
+      { id: 'contracted', label: '계약 완료',      cls: 'bg-purple-lt' },
+      { id: 'purchased',  label: '구매 완료',      cls: 'bg-green-lt' }
+    ],
+    utilities: [
+      { id: 'n2',    label: 'N2' },
+      { id: 'air',   label: '공압' },
+      { id: 'power', label: '전기공사' },
+      { id: 'water', label: '워터' },
+      { id: 'duct',  label: '덕트' }
+    ],
+    paymentMethods: ['법인카드', '계좌이체', '구매팀 발주', '기타'],
+    bidThreshold: 20000000,        /* 이 금액 이상이면 입찰 대상으로 안내 (procurementTiers 의 구매팀 입찰 기준) */
+    managerUnlockMinutes: 10,      /* 중간 담당자·구매 담당자 비밀번호 확인 후 잠금 유지 시간(분) */
+    /* 기본 중간 담당자 (local 모드): 이름이 없으면 만들어 둡니다. 관리자 탭에서도 추가·PIN 재설정 가능 */
+    defaultManagers: []
   },
 
   /* 소모품 재고 */

@@ -13,7 +13,8 @@
     { id: 'budget', href: 'budget/index.html', icon: 'shopping-cart', color: 'bg-blue-lt', title: '구매 요청' },
     { id: 'equipment', href: 'equipment/index.html', icon: 'calendar-event', color: 'bg-orange-lt', title: '장비 예약' },
     { id: 'meeting', href: 'meeting/index.html', icon: 'users-group', color: 'bg-green-lt', title: '회의비 처리' },
-    { id: 'inventory', href: 'inventory/index.html', icon: 'packages', color: 'bg-purple-lt', title: '소모품 재고' }
+    { id: 'inventory', href: 'inventory/index.html', icon: 'packages', color: 'bg-purple-lt', title: '소모품 재고' },
+    { id: 'acquisition', href: 'acquisition/index.html', icon: 'truck-delivery', color: 'bg-red-lt', title: '장비 도입' }
   ];
   var STATUS = { active: { label: '사용 중', cls: 'bg-green-lt' }, pending: { label: '승인 대기', cls: 'bg-yellow-lt' }, disabled: { label: '중지', cls: 'bg-secondary-lt' }, rejected: { label: '거절', cls: 'bg-red-lt' } };
 
@@ -57,7 +58,7 @@
       app.innerHTML = '<div class="container-tight py-5"><div class="card card-md"><div class="card-body">' + empty('hourglass', '관리자 승인 대기 중입니다', '승인이 끝나면 메뉴를 쓸 수 있습니다.') + '<div class="text-center"><button type="button" class="btn" data-action="signout">로그아웃</button></div></div></div></div>';
       return;
     }
-    var html = '<div class="tool-grid"><div class="row g-4">' + TOOLS.map(function (t) {
+    var html = '<div class="tool-grid"><div class="row g-4 justify-content-center">' + TOOLS.map(function (t) {
       return '<div class="col-md-6"><a href="' + t.href + '" class="card card-link card-link-pop tool-tile"><span class="avatar ' + t.color + '"><i class="ti ti-' + t.icon + '"></i></span><h3 class="tool-title">' + esc(t.title) + '</h3></a></div>';
     }).join('') + '</div></div>';
     if (state.session.isAdmin) html += renderAdmin();

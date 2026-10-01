@@ -2,9 +2,9 @@
 <html lang="ko" data-bs-theme="light">
 <head>
   <meta charset="utf-8">
-  <title>소모품 재고 | DSIL Lab Portal</title>
+  <title>장비 도입 | DSIL Lab Portal</title>
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="description" content="DSIL 연구실 소모품 재고. 보관 장소별 보유량, 소모 처리, 입출고 이력.">
+  <meta name="description" content="DSIL 연구실 장비 도입 관리. 도입 신청, 중간 담당자 확인, 입찰·결제·유틸리티·배치 진행 상황과 변경 이력.">
   <link rel="icon" href="../assets/img/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.5.0/dist/css/tabler.min.css">
@@ -37,9 +37,9 @@
             <li class="nav-item"><a class="nav-link" href="../index.html"><span class="nav-link-icon"><i class="ti ti-home"></i></span><span class="nav-link-title">홈</span></a></li>
             <li class="nav-item"><a class="nav-link" href="../budget/index.html"><span class="nav-link-icon"><i class="ti ti-shopping-cart"></i></span><span class="nav-link-title">구매 요청</span></a></li>
             <li class="nav-item"><a class="nav-link" href="../equipment/index.html"><span class="nav-link-icon"><i class="ti ti-calendar-event"></i></span><span class="nav-link-title">장비 예약</span></a></li>
-            <li class="nav-item"><a class="nav-link" href="../acquisition/index.html"><span class="nav-link-icon"><i class="ti ti-truck-delivery"></i></span><span class="nav-link-title">장비 도입</span></a></li>
+            <li class="nav-item active"><a class="nav-link" href="./index.html"><span class="nav-link-icon"><i class="ti ti-truck-delivery"></i></span><span class="nav-link-title">장비 도입</span></a></li>
             <li class="nav-item"><a class="nav-link" href="../meeting/index.html"><span class="nav-link-icon"><i class="ti ti-users-group"></i></span><span class="nav-link-title">회의비</span></a></li>
-            <li class="nav-item active"><a class="nav-link" href="./index.html"><span class="nav-link-icon"><i class="ti ti-packages"></i></span><span class="nav-link-title">재고</span></a></li>
+            <li class="nav-item"><a class="nav-link" href="../inventory/index.html"><span class="nav-link-icon"><i class="ti ti-packages"></i></span><span class="nav-link-title">재고</span></a></li>
           </ul>
         </div>
       </div>
@@ -51,7 +51,7 @@
           <div class="row g-2 align-items-center">
             <div class="col">
               <div class="page-pretitle">DSIL Lab Portal</div>
-              <h2 class="page-title">소모품 재고</h2>
+              <h2 class="page-title">장비 도입</h2>
             </div>
             <div class="col-auto ms-auto d-print-none">
               <button type="button" class="btn btn-sm" data-action="refresh"><i class="ti ti-refresh me-1"></i>새로고침</button>
@@ -91,6 +91,7 @@
   <script src="https://cdn.jsdelivr.net/npm/@tabler/core@1.5.0/dist/js/tabler.min.js" defer></script>
   <script src="../assets/js/ui.js"></script>
   <script src="../assets/js/store.js"></script>
-  <script src="../assets/js/inventory.js"></script>
+  <script src="../assets/js/budget-core.js"></script>
+  <script src="../assets/js/acquisition.js"></script>
 </body>
 </html>
