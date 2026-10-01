@@ -33,7 +33,6 @@ window.DSIL_CONFIG = {
      clearRequests  : 구매 요청·구매 보고서·회의비 청구·회의록·구매 심의·내보내기 이력·회의비 처리 로그 (보고서 사진도 함께 삭제)
      clearEquipment : 장비 예약과 사용 로그
      clearInventory : 소모품 품목과 입출고 이력 (담당자 지정은 유지)
-     clearAcquisitions : 장비 도입 건과 변경 이력 (중간 담당자 지정은 유지)
      clearSecurity  : 보안 이벤트·출석 기록
      pruneAccounts  : 관리자와 defaultAccounts 에 없는 계정 삭제
      clearLogs      : 위 전부 (예전 초기화에서 쓰던 방식) */
@@ -63,7 +62,7 @@ window.DSIL_CONFIG = {
     refreshDays: 14,            /* 행정 현황 갱신 주기(일). 기준일이 이보다 오래되면 갱신 안내 */
     mustSpendDays: 120,         /* 종료일까지 이 일수 이하로 남으면 '종료 임박' */
     recentCheckDays: 7,         /* 기준일 직전 이 기간에 처리한 건은 행정 잔액 반영 여부 확인 대상으로 표시 */
-    /* 예산 관리·배정에서 빼는 과제 (참여과제 시트 약칭 또는 엑셀 구분) */
+    /* 예산 관리·배정에서 빼는 과제 (참여과제 시트 약칭 또는 엑셀 구분, 이름에 포함되면 제외) */
     excludeAliases: ['개인과제', '이노코어', '성장형포스닥', '기본과제'],
     /* 엑셀 '구분' → 참여과제 시트 약칭. 같은 이름이면 적지 않아도 됩니다 */
     aliasMap: {
@@ -76,6 +75,23 @@ window.DSIL_CONFIG = {
     }
   },
 
+  /* 구매 요청 컨펌 절차
+     professorThreshold 이하: 각 팀 중간관리자가 컨펌 (필요하면 중간관리자가 판단해 교수님께 컨펌)
+     professorThreshold 초과: 구매행정 시스템으로 교수님 컨펌
+     teams[].manager 는 중간관리자 이름 (정해지면 채우세요. 비우면 요청자가 직접 적음) */
+  purchaseRequest: {
+    teams: [
+      { id: 'CP',     manager: '' },
+      { id: 'RF',     manager: '' },
+      { id: 'Logic',  manager: '' },
+      { id: 'Memory', manager: '' },
+      { id: 'DB',     manager: '' }
+    ],
+    professorThreshold: 5000000,
+    cycles: ['일회성', '매주', '매월', '분기(3개월)', '반기(6개월)', '연 1회', '비정기(필요할 때마다)'],
+    usageMinLength: 10
+  },
+
   /* 구매 절차 기준 (KAIST). 금액이 upTo 이하이면 해당 단계, null 은 상한 없음. 위에서부터 차례로 판정. */
   procurementTiers: [
     { upTo: 5000000,  label: '자체 검수',   cls: 'bg-green-lt',  desc: '500만원 이하 · 중앙검수 불필요' },
@@ -83,12 +99,6 @@ window.DSIL_CONFIG = {
     { upTo: 19999999, label: '구매팀 구매', cls: 'bg-orange-lt', desc: '1,000만원 이상 · 구매팀 경유' },
     { upTo: null,     label: '구매팀 입찰', cls: 'bg-red-lt',    desc: '2,000만원 이상 · 구매팀 입찰' }
   ],
-
-  /* 구매 요청: 구매 주기 선택지와 사용 용도 최소 글자 수 (관리자 배정·구매 보고서에 그대로 쓰임) */
-  purchaseRequest: {
-    cycles: ['일회성', '매주', '매월', '분기(3개월)', '반기(6개월)', '연 1회', '비정기(필요할 때마다)'],
-    usageMinLength: 10
-  },
 
   /* 구매 심의 열람 PIN 형식 (숫자 4~8자리) */
   reviewPinPattern: '\\d{4,8}',
@@ -152,34 +162,6 @@ window.DSIL_CONFIG = {
     /* 알림 웹훅(Discord 또는 Slack incoming webhook URL). 비우면 포털 관리자 화면의 보안 이벤트에만 남습니다.
        이 파일은 공개 저장소에 올라가므로 웹훅 주소가 노출됩니다. 노출이 싫으면 공용 DB 모드에서 DB 트리거 알림을 쓰세요. */
     alertWebhookUrl: ''
-  },
-
-  /* 장비 도입 (구매 계획·입찰·결제·유틸리티·배치)
-     중간 담당자: 신청을 확인·등록하고 장비 구매 담당자와 그 건의 비밀번호를 정함 (로그인 이름 + 중간 담당자 PIN)
-     구매 담당자: 로그인 후 그 건의 비밀번호로 진행 상황을 갱신. 모든 변경은 관리자만 보는 이력에 남음
-     예산: 관리자가 승인한 결제 항목만 과제 예산에 반영 (구매 완료 전 가할당, 구매 완료 후 실집행)
-     stages·utilities 의 id 는 저장 키이므로 운영 중에 바꾸지 마세요. label 은 자유롭게 수정 가능. */
-  equipmentAcquisition: {
-    stages: [
-      { id: 'plan',       label: '장비 도입 계획', cls: 'bg-secondary-lt' },
-      { id: 'bid_doc',    label: '입찰서 작성',    cls: 'bg-azure-lt',  bid: true },
-      { id: 'bid_before', label: '입찰 전',        cls: 'bg-blue-lt',   bid: true },
-      { id: 'bid_failed', label: '유찰',           cls: 'bg-orange-lt', bid: true },
-      { id: 'contracted', label: '계약 완료',      cls: 'bg-purple-lt' },
-      { id: 'purchased',  label: '구매 완료',      cls: 'bg-green-lt' }
-    ],
-    utilities: [
-      { id: 'n2',    label: 'N2' },
-      { id: 'air',   label: '공압' },
-      { id: 'power', label: '전기공사' },
-      { id: 'water', label: '워터' },
-      { id: 'duct',  label: '덕트' }
-    ],
-    paymentMethods: ['법인카드', '계좌이체', '구매팀 발주', '기타'],
-    bidThreshold: 20000000,        /* 이 금액 이상이면 입찰 대상으로 안내 (procurementTiers 의 구매팀 입찰 기준) */
-    managerUnlockMinutes: 10,      /* 중간 담당자·구매 담당자 비밀번호 확인 후 잠금 유지 시간(분) */
-    /* 기본 중간 담당자 (local 모드): 이름이 없으면 만들어 둡니다. 관리자 탭에서도 추가·PIN 재설정 가능 */
-    defaultManagers: []
   },
 
   /* 소모품 재고 */

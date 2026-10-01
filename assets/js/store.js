@@ -49,22 +49,6 @@
    Equipment   { id, name, location, managerName, description, rules, color, active, createdAt, users }
    Reservation { id, createdAt, equipmentId, userId, userName, start, end, purpose, status:'booked'|'cancelled', logId, cancelledAt, cancelledBy }
    UsageLog    { id, createdAt, reservationId, equipmentId, userId, userName, usedStart, usedEnd, condition:'normal'|'issue', content, issues, waived, waivedBy }
-
-   장비 도입 (acquisition.js)   auth = {admin:true} | {managerId, pin}(중간 담당자) | {pin}(구매 담당자, 로그인 이름 + 건 PIN)
-     acqListManagers() / acqSaveManager(m, {pin}) / acqDeleteManager(id) / acqVerifyManager(managerId, pin)
-     acqList()                                        -> Acquisition[] (supabase 구성원: 금액·결제 항목 제외)
-     acqOpen(id, auth)                                -> 전체 필드
-     acqRequest(fields)                               -> 구성원 신청 (status requested)
-     acqCreate(fields, {purchaserName, pin}, mgr)     -> 중간 담당자 직접 등록 (status active)
-     acqConfirm(id, {purchaserName, pin}, fields, mgr) / acqRejectRequest(id, note, mgr)
-     acqUpdate(id, patch, auth)                       -> 역할별 허용 필드만, 변경 이력 기록. patch.newPin·purchaserName 은 중간 담당자·관리자
-     acqApprove(id, note) / acqRevokeApproval(id, 'none'|'rejected', note) / acqSetStatus(id, 'active'|'cancelled', note)   (관리자)
-     acqListLogs()                                    -> 변경 이력 (관리자)
-     acqAllocations()                                 -> [{acqId, name, projectId, category, amount, kind:'actual'|'provisional'}]
-   Acquisition { id, createdAt, updatedAt, status:'requested'|'active'|'rejected'|'cancelled', requestedBy, registeredBy, confirmedAt, purchaserName,
-                 name, model, estAmount, profConfirmed, profConfirmedAt, purpose, targetDate, timelineNote,
-                 stage, bidRequired, bidFailCount, payments:[{projectId, category, amount, method}], utilities:{<id>:{state:'none'|'need'|'ready', note}},
-                 location, note, approval:{status:'none'|'approved'|'rejected', at, by, note, payments} }
    ===================================================================== */
 (function () {
   'use strict';
@@ -123,96 +107,6 @@
     return (reportCfg(cfg).inspectors || []).some(function (n) { return nameKey(n) === nameKey(name); });
   }
 
-  /* ---------- 장비 도입 공통 규칙 ----------
-     중간 담당자(acqManagers)가 신청을 확인·등록하면서 구매 담당자와 그 건의 PIN 을 정하고,
-     구매 담당자는 로그인 이름 + 건 PIN 으로 진행 항목을 갱신. 관리자 승인분만 과제 예산에 반영 */
-  var ACQ_REG_FIELDS = ['name', 'model', 'estAmount', 'profConfirmed', 'profConfirmedAt', 'purpose', 'targetDate', 'timelineNote', 'confirmedBy', 'relatedProjectId'];
-  var ACQ_PROG_FIELDS = ['estAmount', 'stage', 'bidRequired', 'bidFailCount', 'payments', 'utilities', 'location', 'note'];
-  var ACQ_UTIL_STATES = ['none', 'need', 'ready'];
-  function acqCfg(cfg) {
-    return Object.assign({ stages: [{ id: 'plan' }], utilities: [], managerUnlockMinutes: 10, defaultManagers: [] }, (cfg && cfg.equipmentAcquisition) || {});
-  }
-  function acqStageIds(cfg) { return acqCfg(cfg).stages.map(function (s) { return s.id; }); }
-  function str(v) { return String(v === null || v === undefined ? '' : v).trim(); }
-  function pick(src, keys) { var o = {}; keys.forEach(function (k) { if (src && k in src) o[k] = src[k]; }); return o; }
-  /* 입력값 정리: 알려진 필드만 받고 형식을 맞춤 */
-  function normAcqFields(src, cfg) {
-    var out = {};
-    if (!src) return out;
-    if ('name' in src) out.name = str(src.name);
-    if ('model' in src) out.model = str(src.model);
-    if ('estAmount' in src) out.estAmount = Math.max(0, Math.round(Number(src.estAmount) || 0));
-    if ('profConfirmed' in src) out.profConfirmed = !!src.profConfirmed;
-    if ('profConfirmedAt' in src) out.profConfirmedAt = str(src.profConfirmedAt);
-    if ('purpose' in src) out.purpose = str(src.purpose);
-    if ('targetDate' in src) out.targetDate = str(src.targetDate);
-    if ('timelineNote' in src) out.timelineNote = str(src.timelineNote);
-    if ('confirmedBy' in src) out.confirmedBy = str(src.confirmedBy);            /* 중간 담당자가 적는 컨펌해 준 사람 */
-    if ('relatedProjectId' in src) out.relatedProjectId = str(src.relatedProjectId); /* 가장 관련 있는 과제 (결제 과제와 별개) */
-    if ('stage' in src) { var ids = acqStageIds(cfg); out.stage = ids.indexOf(src.stage) >= 0 ? src.stage : ids[0]; }
-    if ('bidRequired' in src) out.bidRequired = !!src.bidRequired;
-    if ('bidFailCount' in src) out.bidFailCount = Math.max(0, Math.floor(Number(src.bidFailCount) || 0));
-    if ('payments' in src) {
-      var cats = categoryIds(cfg);
-      out.payments = (Array.isArray(src.payments) ? src.payments : []).map(function (p) {
-        return { projectId: str(p && p.projectId), category: cats.indexOf(p && p.category) >= 0 ? p.category : cats[0], amount: Math.max(0, Math.round(Number(p && p.amount) || 0)), method: str(p && p.method) };
-      }).filter(function (p) { return p.projectId || p.amount > 0 || p.method; });
-    }
-    if ('utilities' in src) {
-      out.utilities = {};
-      acqCfg(cfg).utilities.forEach(function (u) {
-        var v = (src.utilities && src.utilities[u.id]) || {};
-        out.utilities[u.id] = { state: ACQ_UTIL_STATES.indexOf(v.state) >= 0 ? v.state : 'none', note: str(v.note) };
-      });
-    }
-    if ('location' in src) out.location = str(src.location);
-    if ('note' in src) out.note = str(src.note);
-    return out;
-  }
-  function acqDefaults(cfg) {
-    return normAcqFields({ name: '', model: '', estAmount: 0, profConfirmed: false, profConfirmedAt: '', purpose: '', targetDate: '', timelineNote: '', confirmedBy: '', relatedProjectId: '',
-      stage: acqStageIds(cfg)[0], bidRequired: false, bidFailCount: 0, payments: [], utilities: {}, location: '', note: '' }, cfg);
-  }
-  /* 바뀐 필드만 [{field, before, after}] */
-  function acqDiff(before, after, keys) {
-    var out = [];
-    keys.forEach(function (k) {
-      if (!(k in after)) return;
-      var b = before[k] === undefined ? null : before[k];
-      if (JSON.stringify(b) !== JSON.stringify(after[k])) out.push({ field: k, before: b, after: after[k] });
-    });
-    return out;
-  }
-  function acqMissing(a) {
-    var miss = [];
-    if (!a.name) miss.push('장비명');
-    if (!a.purpose) miss.push('사용 의도');
-    if (!a.targetDate) miss.push('주요 도입 시기');
-    return miss;
-  }
-  /* 중간 담당자가 확인·등록할 때 꼭 채우는 항목 (구성원 신청 단계에서는 비워도 됨) */
-  function acqMidMissing(a) {
-    var miss = [];
-    if (!a.confirmedBy) miss.push('컨펌한 사람');
-    if (!a.relatedProjectId) miss.push('관련 과제');
-    return miss;
-  }
-  function publicAcqManager(m) { return { id: m.id, name: m.name, createdAt: m.createdAt }; }
-  function publicAcq(a) { var o = JSON.parse(JSON.stringify(a)); delete o.pinHash; o.hasPin = !!a.pinHash; return o; }
-  /* 승인 시점의 결제 항목(approval.payments)이 예산에 반영됨. 구매 완료면 실집행, 그 전이면 가할당 */
-  function acqAllocationsOf(list) {
-    var out = [];
-    list.forEach(function (a) {
-      if (a.status !== 'active' || !a.approval || a.approval.status !== 'approved') return;
-      (a.approval.payments || []).forEach(function (p) {
-        if (!p.projectId || !(p.amount > 0)) return;
-        var bought = a.stage === 'purchased';
-        out.push({ acqId: a.id, name: a.name, projectId: p.projectId, category: p.category, amount: p.amount, kind: bought ? 'actual' : 'provisional', approvedAt: a.approval.at, at: bought ? (a.purchasedAt || a.approval.at) : a.approval.at });
-      });
-    });
-    return out;
-  }
-
   /* ---------- 출석 공통 규칙 ---------- */
   var ATT_KEY = 'dsil-att-session-v1';
   function attendanceCfg(cfg) { return Object.assign({ openAfter: '06:00', lateAfter: '09:00', closeAfter: '11:00', vacationDaysPerHalf: 2, selfRegister: true, holidays: {} }, cfg.attendance || {}); }
@@ -250,8 +144,7 @@
   /* 빈 데이터: migrate() 가 관리자 계정(관리자 / 0000)과 공휴일 초기값만 채움 */
   function emptyData() {
     return { accounts: [], projects: [], requests: [], reviews: [], exports: [], equipment: [], reservations: [], usageLogs: [],
-      attMembers: [], attRecords: [], attLeaves: [], attHolidays: null, invManagers: [], invItems: [], invMoves: [], security: [], participationImport: null, participationRows: [], meetingLogs: [],
-      acqManagers: [], acquisitions: [], acqLogs: [], dataResetId: null };
+      attMembers: [], attRecords: [], attLeaves: [], attHolidays: null, invManagers: [], invItems: [], invMoves: [], security: [], participationImport: null, participationRows: [], meetingLogs: [], dataResetId: null };
   }
 
   /* ------------------------------------------------------------------ */
@@ -503,16 +396,6 @@
     if (!Array.isArray(data.invManagers)) data.invManagers = [];
     if (!Array.isArray(data.invItems)) data.invItems = [];
     if (!Array.isArray(data.invMoves)) data.invMoves = [];
-    if (!Array.isArray(data.acqManagers)) data.acqManagers = [];
-    if (!Array.isArray(data.acquisitions)) data.acquisitions = [];
-    if (!Array.isArray(data.acqLogs)) data.acqLogs = [];     /* 장비 도입 변경 이력 (추가만, 관리자 열람) */
-    var acqBase = acqDefaults(cfg);
-    data.acquisitions.forEach(function (a) {
-      Object.keys(acqBase).forEach(function (k) { if (a[k] === undefined) a[k] = JSON.parse(JSON.stringify(acqBase[k])); });
-      a.utilities = normAcqFields({ utilities: a.utilities }, cfg).utilities;   /* 유틸리티 목록이 설정에서 늘어난 경우 */
-      if (!a.status) a.status = 'active';
-      if (!a.approval || typeof a.approval !== 'object') a.approval = { status: 'none' };
-    });
     if (!Array.isArray(data.security)) data.security = [];
     if (!Array.isArray(data.accounts)) data.accounts = [];
     if (!data.accounts.some(function (a) { return a.role === 'admin'; })) {
@@ -533,7 +416,6 @@
       }
       if (all || reset.clearEquipment) { data.reservations = []; data.usageLogs = []; }
       if (all || reset.clearInventory) { data.invItems = []; data.invMoves = []; }
-      if (all || reset.clearAcquisitions) { data.acquisitions = []; data.acqLogs = []; }
       if (all || reset.clearSecurity) { data.security = []; data.attRecords = []; data.attLeaves = []; }
       if (reset.pruneAccounts) {
         var keep = (cfg.defaultAccounts || []).map(function (d) { return nameKey(d.name); });
@@ -555,11 +437,6 @@
         description: d.description || '', rules: d.rules || '', color: d.color || '#004191', active: true, createdAt: nowISO(),
         users: (d.users || []).map(function (u) { return { id: uid(), name: String(u.name || '').trim(), grade: u.grade || 'user', grantedAt: nowISO(), grantedBy: '시스템 (기본 설정)' }; }).filter(function (u) { return u.name; })
       });
-    });
-    (acqCfg(cfg).defaultManagers || []).forEach(function (d) {
-      if (!d || !d.name) return;
-      if (data.acqManagers.some(function (m) { return nameKey(m.name) === nameKey(d.name); })) return;
-      data.acqManagers.push({ id: uid(), name: String(d.name).trim(), pinHash: '', seedPin: String(d.pin || '0000'), createdAt: nowISO() });
     });
     return data;
   }
@@ -653,12 +530,10 @@
     function ensureSeedHashes() {
       var todo = data.accounts.filter(function (a) { return !a.pinHash && a.seedPin; });
       var todoEq = data.equipment.filter(function (e) { return !e.managerPinHash && e.seedManagerPin; });
-      var todoAcq = data.acqManagers.filter(function (m) { return !m.pinHash && m.seedPin; });
-      if (!todo.length && !todoEq.length && !todoAcq.length) return Promise.resolve();
+      if (!todo.length && !todoEq.length) return Promise.resolve();
       return Promise.all(
         todo.map(function (a) { return hashPin(a.seedPin).then(function (h) { a.pinHash = h; delete a.seedPin; }); })
           .concat(todoEq.map(function (e) { return hashPin(e.seedManagerPin).then(function (h) { e.managerPinHash = h; delete e.seedManagerPin; }); }))
-          .concat(todoAcq.map(function (m) { return hashPin(m.seedPin).then(function (h) { m.pinHash = h; delete m.seedPin; }); }))
       ).then(function () { write(); });
     }
 
@@ -709,45 +584,6 @@
         return m;
       });
     }
-
-    /* 장비 도입 중간 담당자: 등록된 이름과 로그인 이름이 같고 담당자 PIN 이 맞아야 함 (포털 관리자는 이름 확인 면제) */
-    function isAcqManager(m) {
-      if (!session || !m) return false;
-      if (session.isAdmin) return true;
-      return nameKey(m.name) === nameKey(session.user.name);
-    }
-    function checkAcqManager(creds) {
-      var err = needSession(); if (err) return Promise.reject(err);
-      var m = data.acqManagers.filter(function (x) { return x.id === (creds && creds.managerId); })[0];
-      if (!m) return Promise.reject(new Error('중간 담당자 확인이 필요합니다.'));
-      if (!isAcqManager(m)) return Promise.reject(new Error('장비 도입 중간 담당자로 등록된 계정이 아닙니다. 이 항목의 담당자는 ' + m.name + ' 입니다.'));
-      return hashPin(creds.pin).then(function (h) {
-        if (h !== m.pinHash) throw new Error('중간 담당자 PIN이 올바르지 않습니다.');
-        return m;
-      });
-    }
-    function acqById(id) { return data.acquisitions.filter(function (x) { return x.id === id; })[0] || null; }
-    /* auth: { admin:true } | { managerId, pin } (중간 담당자) | { pin } (구매 담당자: 로그인 이름 + 건 PIN) */
-    function resolveAcqAuth(a, auth) {
-      var err = needSession(); if (err) return Promise.reject(err);
-      if (!a) return Promise.reject(new Error('장비 도입 건을 찾을 수 없습니다.'));
-      if (auth && auth.admin) return session.isAdmin ? Promise.resolve({ role: 'admin', name: session.user.name }) : Promise.reject(new Error('관리자 권한이 없습니다.'));
-      if (auth && auth.managerId) return checkAcqManager(auth).then(function (m) { return { role: 'mid', name: m.name }; });
-      if (auth && auth.pin !== undefined) {
-        if (!a.purchaserName || nameKey(a.purchaserName) !== nameKey(session.user.name)) return Promise.reject(new Error('이 건의 장비 구매 담당자가 아닙니다. 구매 담당자는 ' + (a.purchaserName || '미지정') + ' 입니다.'));
-        return hashPin(auth.pin).then(function (h) {
-          if (!a.pinHash || h !== a.pinHash) throw new Error('장비 등록 비밀번호가 올바르지 않습니다.');
-          return { role: 'purchaser', name: session.user.name };
-        });
-      }
-      return Promise.reject(new Error('권한 확인이 필요합니다.'));
-    }
-    function addAcqLog(a, who, action, changes, note) {
-      var rec = { id: uid(), createdAt: nowISO(), acqId: a.id, acqName: a.name, by: who.name, role: who.role, action: action, changes: changes || [], note: str(note) };
-      data.acqLogs.unshift(rec);
-      return rec;
-    }
-    function acqPinOk(pin) { return /^\d{4,8}$/.test(String(pin || '')); }
 
     /* managerPin === null 이면 포털 관리자 경로, 아니면 담당자 이름 + PIN 을 함께 확인 */
     function checkManager(eq, managerPin) {
@@ -1508,204 +1344,6 @@
         return Promise.resolve(clone(mv));
       },
 
-      /* ---------- 장비 도입 ---------- */
-      acqListManagers: function () { return Promise.resolve(data.acqManagers.map(publicAcqManager)); },
-
-      acqSaveManager: function (m, opts) {
-        if (!session || !session.isAdmin) return Promise.reject(new Error('관리자만 중간 담당자를 지정할 수 있습니다.'));
-        var nm = str(m.name);
-        if (!nm) return Promise.reject(new Error('이름을 입력하세요.'));
-        if (opts && opts.pin && !acqPinOk(opts.pin)) return Promise.reject(new Error('PIN은 숫자 4~8자리입니다.'));
-        if (data.acqManagers.some(function (x) { return x.id !== m.id && nameKey(x.name) === nameKey(nm); })) return Promise.reject(new Error('이미 중간 담당자로 등록된 이름입니다.'));
-        var idx = data.acqManagers.findIndex(function (x) { return x.id === m.id; });
-        var rec = Object.assign({}, idx >= 0 ? data.acqManagers[idx] : { id: uid(), createdAt: nowISO(), pinHash: '' }, { name: nm });
-        var p = (opts && opts.pin) ? hashPin(opts.pin).then(function (h) { rec.pinHash = h; }) : Promise.resolve();
-        return p.then(function () {
-          if (!rec.pinHash) throw new Error('중간 담당자 PIN을 정해 주세요.');
-          if (idx >= 0) data.acqManagers[idx] = rec; else data.acqManagers.push(rec);
-          write(); emit();
-          return publicAcqManager(rec);
-        });
-      },
-
-      acqDeleteManager: function (id) {
-        if (!session || !session.isAdmin) return Promise.reject(new Error('관리자만 중간 담당자를 삭제할 수 있습니다.'));
-        data.acqManagers = data.acqManagers.filter(function (x) { return x.id !== id; });
-        write(); emit(); return Promise.resolve();
-      },
-
-      acqVerifyManager: function (managerId, pin) {
-        return checkAcqManager({ managerId: managerId, pin: pin }).then(function () { return true; }, function (e) {
-          if (/PIN이 올바르지/.test(e.message)) return false;
-          throw e;
-        });
-      },
-
-      /* 전체 목록 (local 은 결제 항목까지 포함. 화면에서 권한별로 가림) */
-      acqList: function () { return Promise.resolve(data.acquisitions.map(publicAcq)); },
-
-      /* 권한 확인 후 전체 필드 (구매 담당자·중간 담당자·관리자) */
-      acqOpen: function (id, auth) {
-        var a = acqById(id);
-        return resolveAcqAuth(a, auth).then(function () { return publicAcq(a); });
-      },
-
-      /* 구성원 도입 신청 → 중간 담당자 확인 대기 */
-      acqRequest: function (fields) {
-        var err = needSession(); if (err) return Promise.reject(err);
-        var f = Object.assign(acqDefaults(cfg), normAcqFields(pick(fields, ACQ_REG_FIELDS), cfg));
-        var miss = acqMissing(f);
-        if (miss.length) return Promise.reject(new Error('빠진 항목: ' + miss.join(', ')));
-        var now = nowISO();
-        var a = Object.assign({ id: uid(), createdAt: now, updatedAt: now, status: 'requested', requestedBy: session.user.name, registeredBy: '', purchaserName: '', pinHash: '', approval: { status: 'none' } }, f);
-        data.acquisitions.unshift(a);
-        addAcqLog(a, { name: session.user.name, role: 'member' }, 'request', acqDiff({}, f, ACQ_REG_FIELDS));
-        write(); emit();
-        return Promise.resolve(publicAcq(a));
-      },
-
-      /* 중간 담당자 직접 등록 (확인 완료 상태로 바로 진행) */
-      acqCreate: function (fields, assign, mgrCreds) {
-        return checkAcqManager(mgrCreds).then(function (m) {
-          var f = Object.assign(acqDefaults(cfg), normAcqFields(pick(fields, ACQ_REG_FIELDS), cfg));
-          var miss = acqMissing(f);
-          if (!str(assign && assign.purchaserName)) miss.push('장비 구매 담당자');
-          miss = miss.concat(acqMidMissing(f));
-          if (miss.length) throw new Error('빠진 항목: ' + miss.join(', '));
-          if (!acqPinOk(assign.pin)) throw new Error('장비 등록 비밀번호는 숫자 4~8자리입니다.');
-          return hashPin(assign.pin).then(function (h) {
-            var now = nowISO();
-            var a = Object.assign({ id: uid(), createdAt: now, updatedAt: now, status: 'active', requestedBy: m.name, registeredBy: m.name, confirmedAt: now,
-              purchaserName: str(assign.purchaserName), pinHash: h, approval: { status: 'none' } }, f);
-            data.acquisitions.unshift(a);
-            addAcqLog(a, { name: m.name, role: 'mid' }, 'create', acqDiff({}, Object.assign({}, f, { purchaserName: a.purchaserName }), ACQ_REG_FIELDS.concat(['purchaserName'])));
-            write(); emit();
-            return publicAcq(a);
-          });
-        });
-      },
-
-      /* 중간 담당자가 신청 건을 확인: 구매 담당자·건 PIN 지정, 등록 항목 보완 */
-      acqConfirm: function (id, assign, fields, mgrCreds) {
-        var a = acqById(id);
-        return checkAcqManager(mgrCreds).then(function (m) {
-          if (!a) throw new Error('장비 도입 건을 찾을 수 없습니다.');
-          if (a.status !== 'requested') throw new Error('확인 대기 중인 신청이 아닙니다.');
-          var f = normAcqFields(pick(fields || {}, ACQ_REG_FIELDS), cfg);
-          var merged = Object.assign({}, a, f);
-          var miss = acqMissing(merged);
-          if (!str(assign && assign.purchaserName)) miss.push('장비 구매 담당자');
-          miss = miss.concat(acqMidMissing(merged));
-          if (miss.length) throw new Error('빠진 항목: ' + miss.join(', '));
-          if (!acqPinOk(assign.pin)) throw new Error('장비 등록 비밀번호는 숫자 4~8자리입니다.');
-          return hashPin(assign.pin).then(function (h) {
-            var changes = acqDiff(a, Object.assign({}, f, { purchaserName: str(assign.purchaserName) }), ACQ_REG_FIELDS.concat(['purchaserName']));
-            changes.push({ field: 'status', before: 'requested', after: 'active' });
-            Object.assign(a, f, { status: 'active', registeredBy: m.name, confirmedAt: nowISO(), purchaserName: str(assign.purchaserName), pinHash: h, updatedAt: nowISO() });
-            addAcqLog(a, { name: m.name, role: 'mid' }, 'confirm', changes);
-            write(); emit();
-            return publicAcq(a);
-          });
-        });
-      },
-
-      acqRejectRequest: function (id, note, mgrCreds) {
-        var a = acqById(id);
-        return checkAcqManager(mgrCreds).then(function (m) {
-          if (!a) throw new Error('장비 도입 건을 찾을 수 없습니다.');
-          if (a.status !== 'requested') throw new Error('확인 대기 중인 신청만 반려할 수 있습니다.');
-          a.status = 'rejected'; a.updatedAt = nowISO();
-          addAcqLog(a, { name: m.name, role: 'mid' }, 'reject', [{ field: 'status', before: 'requested', after: 'rejected' }], note);
-          write(); emit();
-          return publicAcq(a);
-        });
-      },
-
-      /* 갱신: 구매 담당자는 진행 항목, 중간 담당자는 등록 항목 + 구매 담당자·PIN, 관리자는 전부 */
-      acqUpdate: function (id, patch, auth) {
-        var a = acqById(id);
-        return resolveAcqAuth(a, auth).then(function (who) {
-          if (a.status !== 'active' && who.role !== 'admin') throw new Error('진행 중인 건만 수정할 수 있습니다.');
-          var keys = who.role === 'purchaser' ? ACQ_PROG_FIELDS : who.role === 'mid' ? ACQ_REG_FIELDS : ACQ_REG_FIELDS.concat(ACQ_PROG_FIELDS.filter(function (k) { return ACQ_REG_FIELDS.indexOf(k) < 0; }));
-          var f = normAcqFields(pick(patch || {}, keys), cfg);
-          var changes = acqDiff(a, f, keys);
-          var miss = acqMissing(Object.assign({}, a, f));
-          if (miss.length) throw new Error('빠진 항목: ' + miss.join(', '));
-          var newPin = patch && patch.newPin;
-          var canAssign = who.role === 'mid' || who.role === 'admin';
-          if (canAssign && patch && 'purchaserName' in patch) {
-            var pn = str(patch.purchaserName);
-            if (!pn) throw new Error('장비 구매 담당자를 지정하세요.');
-            if (nameKey(pn) !== nameKey(a.purchaserName)) changes.push({ field: 'purchaserName', before: a.purchaserName, after: pn });
-            f.purchaserName = pn;
-          }
-          if (newPin !== undefined && newPin !== '' && !canAssign) throw new Error('장비 등록 비밀번호는 중간 담당자나 관리자만 바꿀 수 있습니다.');
-          if (newPin && !acqPinOk(newPin)) throw new Error('장비 등록 비밀번호는 숫자 4~8자리입니다.');
-          /* 구매 완료 시각: 예산에서 실집행이 기준일 이후인지 판단할 때 씀 */
-          if ('stage' in f && f.stage !== a.stage) f.purchasedAt = f.stage === 'purchased' ? nowISO() : null;
-          return (newPin ? hashPin(newPin) : Promise.resolve(null)).then(function (h) {
-            if (h) { f.pinHash = h; changes.push({ field: 'pin', before: null, after: '재설정' }); }
-            if (!changes.length) return publicAcq(a);
-            Object.assign(a, f, { updatedAt: nowISO() });
-            addAcqLog(a, who, 'update', changes, patch && patch.logNote);
-            write(); emit();
-            return publicAcq(a);
-          });
-        });
-      },
-
-      /* 관리자 승인: 현재 결제 항목을 그대로 과제 예산에 반영 (구매 완료 전 가할당, 구매 완료 후 실집행) */
-      acqApprove: function (id, note) {
-        var a = acqById(id);
-        return resolveAcqAuth(a, { admin: true }).then(function (who) {
-          if (a.status !== 'active') throw new Error('진행 중인 건만 승인할 수 있습니다.');
-          var pays = (a.payments || []).filter(function (p) { return p.projectId && p.amount > 0; });
-          if (!pays.length) throw new Error('결제 방법(과제·금액)이 입력되지 않았습니다. 구매 담당자가 먼저 입력해야 합니다.');
-          var before = a.approval || { status: 'none' };
-          a.approval = { status: 'approved', at: nowISO(), by: who.name, note: str(note), payments: clone(pays) };
-          a.updatedAt = nowISO();
-          addAcqLog(a, who, 'approve', [{ field: 'approval', before: before.status === 'approved' ? before.payments : null, after: a.approval.payments }], note);
-          write(); emit();
-          return publicAcq(a);
-        });
-      },
-
-      /* 승인 취소 또는 반려: 예산 반영이 빠짐 */
-      acqRevokeApproval: function (id, status, note) {
-        var a = acqById(id);
-        return resolveAcqAuth(a, { admin: true }).then(function (who) {
-          var st = status === 'rejected' ? 'rejected' : 'none';
-          var before = a.approval || { status: 'none' };
-          a.approval = { status: st, at: nowISO(), by: who.name, note: str(note) };
-          a.updatedAt = nowISO();
-          addAcqLog(a, who, st === 'rejected' ? 'approval-reject' : 'revoke', [{ field: 'approval', before: before.payments || null, after: null }], note);
-          write(); emit();
-          return publicAcq(a);
-        });
-      },
-
-      /* 관리자: 도입 취소(cancelled) / 다시 진행(active) */
-      acqSetStatus: function (id, status, note) {
-        var a = acqById(id);
-        return resolveAcqAuth(a, { admin: true }).then(function (who) {
-          if (['active', 'cancelled'].indexOf(status) < 0) throw new Error('바꿀 수 없는 상태입니다.');
-          if (status === 'active' && !a.purchaserName) throw new Error('구매 담당자가 지정되지 않은 건입니다. 중간 담당자 확인을 거치세요.');
-          if (a.status === status) return publicAcq(a);
-          addAcqLog(a, who, 'status', [{ field: 'status', before: a.status, after: status }], note);
-          a.status = status; a.updatedAt = nowISO();
-          write(); emit();
-          return publicAcq(a);
-        });
-      },
-
-      acqListLogs: function () {
-        if (!session || !session.isAdmin) return Promise.reject(new Error('변경 이력은 관리자만 볼 수 있습니다.'));
-        return Promise.resolve(clone(data.acqLogs));
-      },
-
-      /* 과제 예산 반영분 (관리자·과제 담당자 화면에서 사용) */
-      acqAllocations: function () { return Promise.resolve(acqAllocationsOf(data.acquisitions)); },
-
       onChange: function (cb) {
         listeners.push(cb);
         return function () { listeners = listeners.filter(function (x) { return x !== cb; }); };
@@ -1836,22 +1474,6 @@
       unitPrice: Number(r.unit_price) || 0, userName: r.user_name || '', note: r.note || '', stockAfter: Number(r.stock_after) || 0 };
   }
 
-  /* 장비 도입: 설명 필드는 data jsonb 에 모여 있음 */
-  function toAcq(row) {
-    if (!row) return null;
-    var d = (row.data && typeof row.data === 'object') ? row.data : {};
-    return Object.assign({}, d, {
-      id: row.id, createdAt: row.created_at, updatedAt: row.updated_at, status: row.status, requestedBy: row.requested_by || '', registeredBy: row.registered_by || '',
-      confirmedAt: row.confirmed_at || null, purchaserName: row.purchaser_name || '', hasPin: row.has_pin !== false,
-      approval: (row.approval && typeof row.approval === 'object') ? row.approval : { status: 'none' }
-    });
-  }
-  function acqAuthJson(auth) {
-    if (auth && auth.admin) return { admin: true };
-    if (auth && auth.managerId) return { managerId: auth.managerId, pin: String(auth.pin || '') };
-    return { pin: String(auth && auth.pin || '') };
-  }
-
   function fromReviewPatch(patch) {
     var map = {
       title: 'title', purpose: 'purpose', vendor: 'vendor', category: 'category', items: 'items', amount: 'amount', note: 'note', pinHash: 'pin_hash',
@@ -1911,7 +1533,6 @@
             .on('postgres_changes', { event: '*', schema: 'public', table: 'projects' }, emit)
             .on('postgres_changes', { event: '*', schema: 'public', table: 'reviews' }, emit)
             .on('postgres_changes', { event: '*', schema: 'public', table: 'reservations' }, emit)
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'equipment_acquisitions' }, emit)
             .subscribe();
         });
       },
@@ -2383,65 +2004,6 @@
       invConsume: function (itemId, qty, note) {
         return client.rpc('inv_consume', { p_item_id: itemId, p_qty: Number(qty) || 0, p_note: String(note || '').trim() })
           .then(unwrap).then(function (rows) { return rows && rows.length ? toInvMove(rows[0]) : null; });
-      },
-
-      /* ---------- 장비 도입 (권한·PIN·이력은 서버 함수가 처리) ---------- */
-      acqListManagers: function () {
-        return client.from('acq_managers_public').select('*').order('name').then(unwrap).then(function (rows) { return rows.map(function (r) { return { id: r.id, name: r.name, createdAt: r.created_at }; }); });
-      },
-      acqSaveManager: function (m, opts) {
-        if (opts && opts.pin && !/^\d{4,8}$/.test(String(opts.pin))) return Promise.reject(new Error('PIN은 숫자 4~8자리입니다.'));
-        var row = { name: str(m.name) };
-        if (m.id) row.id = m.id;
-        var p = (opts && opts.pin) ? hashPin(opts.pin).then(function (h) { row.pin_hash = h; }) : Promise.resolve();
-        return p.then(function () {
-          if (!row.name) throw new Error('이름을 입력하세요.');
-          if (!m.id && !row.pin_hash) throw new Error('중간 담당자 PIN을 정해 주세요.');
-          return client.from('acq_managers').upsert(row).select('id, name, created_at').single().then(unwrap);
-        }).then(function (r) { return { id: r.id, name: r.name, createdAt: r.created_at }; });
-      },
-      acqDeleteManager: function (id) { return client.from('acq_managers').delete().eq('id', id).then(unwrap).then(function () {}); },
-      acqVerifyManager: function (managerId, pin) {
-        return client.rpc('acq_verify_manager', { p_manager_id: managerId, p_pin: String(pin) }).then(unwrap).then(function (v) { return v === true; });
-      },
-      /* 관리자는 전체, 구성원은 금액·결제 항목이 빠진 공개 뷰 */
-      acqList: function () {
-        var src = (profile && profile.is_admin) ? 'equipment_acquisitions' : 'equipment_acquisitions_public';
-        return client.from(src).select('*').order('created_at', { ascending: false }).then(unwrap).then(function (rows) { return rows.map(toAcq); });
-      },
-      acqOpen: function (id, auth) { return client.rpc('acq_open', { p_id: id, p_auth: acqAuthJson(auth) }).then(unwrap).then(toAcq); },
-      acqRequest: function (fields) {
-        return client.rpc('acq_request', { p_data: normAcqFields(pick(fields, ACQ_REG_FIELDS), cfg) }).then(unwrap).then(toAcq);
-      },
-      acqCreate: function (fields, assign, mgrCreds) {
-        return client.rpc('acq_create', { p_manager_id: mgrCreds.managerId, p_pin: String(mgrCreds.pin), p_data: normAcqFields(pick(fields, ACQ_REG_FIELDS), cfg),
-          p_purchaser: str(assign && assign.purchaserName), p_item_pin: String(assign && assign.pin || '') }).then(unwrap).then(toAcq);
-      },
-      acqConfirm: function (id, assign, fields, mgrCreds) {
-        return client.rpc('acq_confirm', { p_manager_id: mgrCreds.managerId, p_pin: String(mgrCreds.pin), p_id: id, p_data: normAcqFields(pick(fields || {}, ACQ_REG_FIELDS), cfg),
-          p_purchaser: str(assign && assign.purchaserName), p_item_pin: String(assign && assign.pin || '') }).then(unwrap).then(toAcq);
-      },
-      acqRejectRequest: function (id, note, mgrCreds) {
-        return client.rpc('acq_reject_request', { p_manager_id: mgrCreds.managerId, p_pin: String(mgrCreds.pin), p_id: id, p_note: str(note) }).then(unwrap).then(toAcq);
-      },
-      acqUpdate: function (id, patch, auth) {
-        var body = normAcqFields(pick(patch || {}, ACQ_REG_FIELDS.concat(ACQ_PROG_FIELDS)), cfg);
-        if (patch && 'purchaserName' in patch) body.purchaserName = str(patch.purchaserName);
-        return client.rpc('acq_update', { p_id: id, p_auth: acqAuthJson(auth), p_patch: body, p_new_pin: patch && patch.newPin ? String(patch.newPin) : null, p_note: str(patch && patch.logNote) })
-          .then(unwrap).then(toAcq);
-      },
-      acqApprove: function (id, note) { return client.rpc('acq_approve', { p_id: id, p_note: str(note) }).then(unwrap).then(toAcq); },
-      acqRevokeApproval: function (id, status, note) { return client.rpc('acq_revoke_approval', { p_id: id, p_status: status === 'rejected' ? 'rejected' : 'none', p_note: str(note) }).then(unwrap).then(toAcq); },
-      acqSetStatus: function (id, status, note) { return client.rpc('acq_set_status', { p_id: id, p_status: status, p_note: str(note) }).then(unwrap).then(toAcq); },
-      acqListLogs: function () {
-        return client.from('acq_logs').select('*').order('created_at', { ascending: false }).then(unwrap).then(function (rows) {
-          return rows.map(function (r) { return { id: r.id, createdAt: r.created_at, acqId: r.acq_id, acqName: r.acq_name || '', by: r.by_name || '', role: r.role, action: r.action, changes: Array.isArray(r.changes) ? r.changes : [], note: r.note || '' }; });
-        });
-      },
-      acqAllocations: function () {
-        return client.from('acq_allocations').select('*').then(unwrap).then(function (rows) {
-          return rows.map(function (r) { return { acqId: r.acq_id, name: r.name || '', projectId: r.project_id, category: r.category, amount: Number(r.amount) || 0, kind: r.kind, approvedAt: r.approved_at, at: r.at || r.approved_at }; });
-        });
       },
 
       onChange: function (cb) {

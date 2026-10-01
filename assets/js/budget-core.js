@@ -1,11 +1,11 @@
 /* =====================================================================
-   DSIL Lab Portal – 과제 예산 계산 (budget.js · meeting.js · acquisition.js 공용)
+   DSIL Lab Portal – 과제 예산 계산 (budget.js · meeting.js 공용)
    ---------------------------------------------------------------------
    세목(pool): budgetCategories 중 pool 이 없는 비목 = 연구시설·장비비 / 연구재료비 / 연구활동비.
                회의비처럼 pool 이 지정된 비목은 그 세목에서 차감.
    기준 잔액:  행정 연구비 현황 엑셀을 올리면 project.budgets 에 그 날짜의 잔액이,
                project.budgetBase 에 기준일·종료 구분·메모가 들어감.
-               잔액 = 기준 잔액 − 기준일 이후 처리된 집행 − 가할당(심의·장비 도입 승인 중 미집행)
+               잔액 = 기준 잔액 − 기준일 이후 처리된 집행 − 가할당(승인된 구매 심의 중 미집행)
                기준일 이전 처리 건은 행정 잔액에 이미 반영된 것으로 봄.
    통합 잔액:  세목 구분 없는 과제(budgetBase.unified 가 숫자)는 모든 비목이 한 잔액에서 차감.
    ===================================================================== */
@@ -54,7 +54,7 @@
 
     function reviewApproved(rv) { return Number(rv.approvedAmount !== null && rv.approvedAmount !== undefined ? rv.approvedAmount : rv.amount) || 0; }
 
-    /* ctx = { requests, reviews(관리자 전체), allocations(장비 도입 승인분) } */
+    /* ctx = { requests, reviews(관리자 전체) } */
     function stats(p, ctx) {
       ctx = ctx || {};
       var pools = {};
@@ -72,12 +72,6 @@
         if (rv.status !== 'approved' || rv.projectId !== p.id) return;
         var used = reqs.reduce(function (s, r) { return s + (r.status === 'done' && r.reviewId === rv.id ? Number(r.amount) || 0 : 0); }, 0);
         bucket(rv.category).provisional += Math.max(0, reviewApproved(rv) - used);
-      });
-      (ctx.allocations || []).forEach(function (al) {
-        if (al.projectId !== p.id) return;
-        var b = bucket(al.category);
-        if (al.kind === 'actual') { if (afterBase(p, al.at)) b.actual += Number(al.amount) || 0; }
-        else b.provisional += Number(al.amount) || 0;
       });
       var out = { unified: unified, pools: {}, budget: 0, actual: 0, provisional: 0, remain: 0 };
       var list = unified ? { unified: u } : pools;

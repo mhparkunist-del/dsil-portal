@@ -15,8 +15,9 @@
   var store = window.DSILStore.create(CFG);
   var UNLOCK_KEY = 'dsil-budget-admin-unlock';
   var TABS = ['requests', 'query', 'review', 'admin'];
-  var PR = Object.assign({ cycles: ['일회성', '매월', '비정기(필요할 때마다)'], usageMinLength: 10 }, CFG.purchaseRequest || {});
+  var PR = Object.assign({ teams: [], professorThreshold: 5000000, cycles: ['일회성', '매월', '비정기(필요할 때마다)'], usageMinLength: 10 }, CFG.purchaseRequest || {});
   var USAGE_MIN = Number(PR.usageMinLength) || 0;
+  var PROF_MIN = Number(PR.professorThreshold) || 5000000;   /* 이 금액 초과: 교수님 컨펌 (구매행정) */
   var URG = {
     must: { label: '올해 소진 필요', cls: 'bg-red-lt', dot: 'bg-red' },
     soon: { label: '종료 임박', cls: 'bg-orange-lt', dot: 'bg-orange' },
@@ -52,7 +53,6 @@
     requests: [],
     reviews: [],
     reviewsFull: false,
-    allocations: [],          /* 장비 도입 승인분 (관리자) */
     budgetSort: 'urgency',
     tab: 'requests',
     editingProjectId: null,
@@ -170,6 +170,39 @@
     return '<option value="">선택…</option>' + PR.cycles.map(function (c) { return '<option value="' + esc(c) + '"' + (c === selected ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('')
       + (selected && PR.cycles.indexOf(selected) < 0 ? '<option value="' + esc(selected) + '" selected>' + esc(selected) + '</option>' : '');
   }
+  /* 구매 컨펌: 팀(중간관리자) · 관련 과제 */
+  function teamManager(id) { var t = PR.teams.filter(function (x) { return x.id === id; })[0]; return t && t.manager ? t.manager : ''; }
+  function teamOptions(selected) {
+    return '<option value="">팀 선택…</option>' + PR.teams.map(function (t) {
+      return '<option value="' + esc(t.id) + '"' + (t.id === selected ? ' selected' : '') + '>' + esc(t.id) + (t.manager ? ' · 중간관리자 ' + esc(t.manager) : '') + '</option>';
+    }).join('');
+  }
+  /* 구성원이 고르는 관련 과제: 이름만 (예산 정보 없음), 예산 관리 제외 과제는 빼고 */
+  function relatedOptions(selected) {
+    var list = state.projects.filter(function (p) { return BUD.isManaged(p) || p.id === selected; })
+      .sort(function (a, b) { return String(a.alias || a.name).localeCompare(String(b.alias || b.name), 'ko'); });
+    return '<option value="">과제 선택…</option>' + list.map(function (p) {
+      var full = p.alias && p.alias !== p.name ? ' · ' + (p.name.length > 26 ? p.name.slice(0, 26) + '…' : p.name) : '';
+      return '<option value="' + esc(p.id) + '"' + (p.id === selected ? ' selected' : '') + ' title="' + esc(p.name) + '">' + esc((p.alias || p.name) + full) + '</option>';
+    }).join('') + '<option value="unknown"' + (selected === 'unknown' ? ' selected' : '') + '>잘 모르겠음 (관리자가 판단)</option>';
+  }
+  function relatedName(r) {
+    if (r.kind === 'meeting' || !r.meta) return '';
+    var p = r.meta.suggestedProjectId ? projectById(r.meta.suggestedProjectId) : null;
+    return p ? (p.alias || p.name) : (r.meta.relatedUnknown ? '모름' : '');
+  }
+  function needsProfessor(amount) { return (Number(amount) || 0) > PROF_MIN; }
+  function confirmGuideHtml(amount) {
+    return needsProfessor(amount)
+      ? '<div class="alert alert-warning py-2 mb-0 small"><i class="ti ti-alert-triangle me-1"></i><strong>' + won(PROF_MIN) + ' 초과</strong>: 구매행정 시스템으로 <strong>교수님 컨펌</strong>을 받은 뒤 올려 주세요. 컨펌한 사람에 교수님 성함을 적습니다.</div>'
+      : '<div class="alert alert-secondary py-2 mb-0 small"><i class="ti ti-users me-1"></i><strong>' + won(PROF_MIN) + ' 이하</strong>: 팀 <strong>중간관리자</strong>가 컨펌합니다. 교수님 컨펌이 꼭 필요한 물품은 중간관리자가 판단해 교수님께 컨펌받습니다.</div>';
+  }
+  function confirmBadges(r) {
+    var m = r.meta || {};
+    if (!m.team && !m.confirmedBy) return '';
+    return '<span class="badge bg-azure-lt me-1" title="팀 · 컨펌한 사람"><i class="ti ti-user-check me-1"></i>' + esc([m.team, m.confirmedBy ? m.confirmedBy + ' 컨펌' : ''].filter(Boolean).join(' · ')) + '</span>';
+  }
+
   /* 빠진 항목은 빨간 테두리 + 토스트로 알림 (버튼은 잠그지 않음) */
   function markMissing(form, checks) {
     $all('.is-invalid', form).forEach(function (el) { el.classList.remove('is-invalid'); });
@@ -248,9 +281,9 @@
   function reviewApproved(rv) { return Number(rv.approvedAmount !== null && rv.approvedAmount !== undefined ? rv.approvedAmount : rv.amount) || 0; }
   function reviewProvisional(rv) { return rv.status === 'approved' ? Math.max(0, reviewApproved(rv) - reviewActual(rv)) : 0; }
 
-  /* 과제 집계 (budget-core). 세목별 기준 잔액 − 기준일 이후 실집행 − 가할당(심의·장비 도입).
+  /* 과제 집계 (budget-core). 세목별 기준 잔액 − 기준일 이후 실집행 − 가할당(승인된 구매 심의 중 미집행).
      byCat[비목] 은 그 비목이 차감되는 세목(통합 잔액 과제는 통합) 집계를 가리킴 */
-  function budgetCtx() { return { requests: state.requests, reviews: state.reviewsFull ? state.reviews : [], allocations: state.allocations }; }
+  function budgetCtx() { return { requests: state.requests, reviews: state.reviewsFull ? state.reviews : [] }; }
   function projectStats(p) {
     var s = BUD.stats(p, budgetCtx());
     var byCat = {};
@@ -330,14 +363,12 @@
       store.listProjects(),
       store.listRequests(),
       state.session ? store.listReviews({ full: full }) : Promise.resolve([]),
-      full ? store.listExports() : Promise.resolve([]),
-      full && store.acqAllocations ? store.acqAllocations() : Promise.resolve([])
+      full ? store.listExports() : Promise.resolve([])
     ]).then(function (res) {
       state.projects = res[0];
       state.requests = res[1].slice().sort(byNewest);
       state.reviews = res[2].slice().sort(byNewest);
       state.exports = res[3].slice().sort(byNewest);
-      state.allocations = res[4];
       state.reviewsFull = full;
       if (state.tab === 'budget') state.tab = 'admin';   /* 예전 주소(#budget) */
       if (state.tab === 'admin' && !isAdminActive()) state.tab = 'requests';
@@ -482,11 +513,18 @@
       + '<div class="col-4"><label class="form-label">합계</label><input type="text" class="form-control tnum" name="amountView" readonly value="0원"></div>'
       + '<div class="col-12"><label class="form-label">관련 구매 심의 <span class="form-label-description">승인된 심의의 가할당에서 집행</span></label><select class="form-select" name="reviewId"' + (myApproved.length ? '' : ' disabled') + '>' + reviewSelect + '</select></div>'
       + '<div class="col-12"><label class="form-label required">사용 용도</label>'
-      + '<div class="alert alert-info py-2 mb-2 small"><i class="ti ti-info-circle me-1"></i><strong>어떤 용도로 쓰는지 상세히 적어 주세요.</strong> 어떤 실험·소자에, 어느 공정 단계에서, 얼마나 쓰는지를 적으면 관리자가 알맞은 과제를 배정하고 구매 보고서에도 그대로 쓸 수 있습니다.'
-      + '<div class="text-secondary mt-1">예: HfO2 FeFET 소자 10월 2차 공정 런 기판. 25매 중 20매 사용, 나머지는 11월 런 예비</div></div>'
-      + '<textarea class="form-control" name="note" rows="3" placeholder="어떤 실험에, 어떤 공정 단계에서, 얼마나 쓰는지 (급하면 필요한 날짜도)"></textarea></div>'
+      + '<div class="alert alert-info py-2 mb-2 small"><i class="ti ti-info-circle me-1"></i><strong>어떤 용도로 쓰는지 상세히 적어 주세요.</strong> 무엇을 위해 사는지 알 수 있으면 관리자가 알맞은 과제를 배정할 수 있습니다.'
+      + '<div class="text-secondary mt-1">예: 메탈 증착을 위한 증착기 유지보수용 오일 구매</div></div>'
+      + '<textarea class="form-control" name="note" rows="2" placeholder="예: 메탈 증착을 위한 증착기 유지보수용 오일 구매"></textarea></div>'
       + '<div class="col-sm-6"><label class="form-label required">구매 주기</label><select class="form-select" name="cycle">' + cycleOptions('') + '</select>'
       + '<div class="form-hint">같은 물품을 얼마나 자주 사는지</div></div>'
+      + '<div class="col-12"><hr class="my-1"><div class="subheader mt-2"><i class="ti ti-user-check me-1"></i>컨펌 · 관련 과제</div></div>'
+      + '<div class="col-12" id="confirm-guide">' + confirmGuideHtml(0) + '</div>'
+      + '<div class="col-sm-4"><label class="form-label required">팀</label><select class="form-select" name="team">' + teamOptions('') + '</select></div>'
+      + '<div class="col-sm-8"><label class="form-label required">컨펌한 사람</label><input type="text" class="form-control" name="confirmedBy" placeholder="팀 중간관리자 이름 (500만원 초과는 교수님)">'
+      + '<div class="form-hint">누구에게 컨펌받았는지 이름을 적어 주세요.</div></div>'
+      + '<div class="col-12"><label class="form-label required">가장 관련 있는 과제</label><select class="form-select" name="relatedProjectId">' + relatedOptions('') + '</select>'
+      + '<div class="form-hint">이 물품을 쓰는 연구와 가장 가까운 과제를 고르면, 관리자가 예산을 고려해 최대한 맞춰 배정합니다.</div></div>'
       + '</div><div class="d-flex justify-content-between align-items-center mt-3"><span class="small text-secondary" id="request-tier"></span><button type="submit" class="btn btn-primary"><i class="ti ti-send me-1"></i>요청 제출</button></div></form>'
       + '</div>'
       + '<div class="col-lg-5">'
@@ -495,9 +533,9 @@
       + mineHtml
       + '<h3 class="card-title mt-4 mb-2"><i class="ti ti-route me-1 text-primary"></i>처리 흐름</h3>'
       + '<div class="list-group list-group-flush">'
-      + step(1, '구매 심의 (필요 시)', '금액이 크거나 나눠 집행할 계획이면 먼저 <a href="#review" data-action="tab" data-tab="review">구매 심의</a>를 올려 과제에 가할당을 받습니다.')
-      + step(2, '구매 요청 제출', '품명·비목·수량·단가를 적어 제출합니다. 미처리 상태에서는 직접 수정·취소할 수 있습니다.')
-      + step(3, '관리자 배정', '관리자가 과제와 비목을 배정하면 <span class="badge bg-blue-lt">처리</span>로 바뀌고 해당 비목에서 실집행으로 차감됩니다.')
+      + step(1, '컨펌 받기', won(PROF_MIN) + ' 이하는 <strong>각 팀 중간관리자</strong>가 컨펌합니다(교수님 컨펌이 꼭 필요한 물품은 중간관리자가 판단해 교수님께 컨펌). ' + won(PROF_MIN) + ' 초과는 지금처럼 <strong>구매행정 시스템으로 교수님</strong>께 컨펌받습니다.')
+      + step(2, '구매 요청 제출', '사용 용도·구매 주기·팀·컨펌한 사람·가장 관련 있는 과제를 적어 제출합니다. 미처리 상태에서는 직접 수정·취소할 수 있습니다.')
+      + step(3, '관리자 과제 배정', '관리자가 2주마다 갱신되는 과제별 재료비·장비비·연구활동비 잔액을 보고 과제를 배정하면 <span class="badge bg-blue-lt">처리</span>로 바뀝니다. 고른 관련 과제에 최대한 맞춥니다.')
       + step(4, '구매 후 보고서', '물품이 오면 요청 조회의 <span class="badge bg-yellow-lt">보고서 미작성</span> 배지를 눌러 영수증·거래내역·검수 사진을 첨부하고 제출합니다. 50만원 초과는 검수 사진, 네이버페이는 주문 캡처가 필요합니다.')
       + step(5, '검수 승인', '포닥연구원 검수자(' + esc((CFG.report && CFG.report.inspectors || []).join(', ') || '지정 필요') + ')가 <span class="badge bg-blue-lt">검수 대기</span> 건을 열어 승인하면 검수자 칸에 서명이 들어가고 <span class="badge bg-green-lt">검수 완료</span>가 됩니다.')
       + '</div>'
@@ -583,8 +621,11 @@
       + (r.link ? ' <a href="' + esc(r.link) + '" target="_blank" rel="noopener" class="text-secondary" title="링크 열기"><i class="ti ti-external-link"></i></a>' : '') + '</div>'
       + '<div class="small text-secondary"><span class="badge badge-outline text-primary me-1">' + esc(catLabel(normCat(r.category))) + '</span>'
       + (r.reviewId ? '<span class="badge bg-green-lt me-1" title="' + esc(rv ? rv.title : '') + '"><i class="ti ti-shield-check"></i> 심의</span>' : '')
-      + (r.meta && r.meta.cycle ? '<span class="badge bg-secondary-lt me-1" title="구매 주기"><i class="ti ti-repeat me-1"></i>' + esc(r.meta.cycle) + '</span>' : '') + esc(meetingSub || r.note || '')
-      + (sug && r.status === 'pending' ? '<span class="ms-1">· 청구 과제 ' + esc(sug.code || sug.name) + '</span>' : '') + '</div>'
+      + (r.meta && r.meta.cycle ? '<span class="badge bg-secondary-lt me-1" title="구매 주기"><i class="ti ti-repeat me-1"></i>' + esc(r.meta.cycle) + '</span>' : '')
+      + confirmBadges(r) + esc(meetingSub || r.note || '')
+      + (r.kind === 'meeting'
+        ? (sug && r.status === 'pending' ? '<span class="ms-1">· 청구 과제 ' + esc(sug.code || sug.name) + '</span>' : '')
+        : (sug ? '<span class="ms-1">· 관련 과제 <span title="' + esc(sug.name) + '">' + esc(sug.alias || sug.name) + '</span></span>' : (r.meta && r.meta.relatedUnknown ? '<span class="ms-1">· 관련 과제 모름</span>' : ''))) + '</div>'
       + (r.status === 'rejected' && r.adminNote ? '<div class="small text-danger">반려 사유: ' + esc(r.adminNote) + '</div>' : '');
   }
 
@@ -663,13 +704,21 @@
   }
 
   /* 배정 추천 3개: 잔액 충분 → 올해 소진 필요 → 종료일 → 요청자 참여 과제 (budget-core suggest) */
+  /* 요청자가 고른 관련 과제를 맨 위에(★), 그 아래 추천 3개 (관련 과제와 겹치면 빼고) */
   function suggestHtml(r, cat) {
-    var list = BUD.suggest(r.amount, poolOf(cat), r.requesterName, state.projects, budgetCtx(), 3);
+    var relId = r.kind !== 'meeting' && r.meta && r.meta.suggestedProjectId;
+    var rel = relId && BUD.isManaged(projectById(relId)) ? projectById(relId) : null;
+    var list = BUD.suggest(r.amount, poolOf(cat), r.requesterName, state.projects, budgetCtx(), 4).filter(function (x) { return !rel || x.project.id !== rel.id; }).slice(0, 3);
+    if (rel) {
+      var rr = BUD.remainFor(rel, poolOf(cat), budgetCtx());
+      list.unshift({ project: rel, remain: rr, after: rr - (Number(r.amount) || 0), enough: rr >= (Number(r.amount) || 0) && rr > 0, urgency: BUD.urgency(rel), member: false, requested: true });
+    }
     if (!list.length) return '<div class="small text-secondary mt-1" data-role="suggest">추천할 과제가 없습니다 (잔액 있는 과제 없음)</div>';
-    return '<div class="mt-2 d-flex flex-column gap-1" data-role="suggest">' + list.map(function (x, i) {
+    var n = 0;
+    return '<div class="mt-2 d-flex flex-column gap-1" data-role="suggest">' + list.map(function (x) {
       var p = x.project, u = URG[x.urgency.level] || URG.later;
       return '<button type="button" class="btn btn-sm btn-outline-' + (x.enough ? 'primary' : 'danger') + ' text-start justify-content-start" data-action="assign-pick" data-project="' + esc(p.id) + '" title="' + esc(p.name) + '">'
-        + '<span class="status-dot ' + u.dot.replace('bg-', 'status-') + ' me-2"></span><span class="fw-medium me-1">' + (i + 1) + '. ' + esc(p.alias || p.name) + '</span>'
+        + '<span class="status-dot ' + u.dot.replace('bg-', 'status-') + ' me-2"></span><span class="fw-medium me-1">' + (x.requested ? '★ 요청자 관련 과제 · ' : (++n) + '. ') + esc(p.alias || p.name) + '</span>'
         + '<span class="small tnum text-secondary">' + won(x.remain) + ' → <span class="' + (x.after < 0 ? 'text-danger' : '') + '">' + won(x.after) + '</span>'
         + (x.urgency.days !== null ? ' · D-' + x.urgency.days : '') + ' · ' + esc(u.label) + (x.urgency.check && x.urgency.level !== 'check' ? ' · <span class="text-orange">집행 전 확인</span>' : '') + (x.member ? ' · 참여' : '') + '</span></button>';
     }).join('') + '</div>';
@@ -912,7 +961,7 @@
       : function (a, b) { return a.u.rank - b.u.rank || (a.u.days === null ? 1e9 : a.u.days) - (b.u.days === null ? 1e9 : b.u.days) || b.s.remain - a.s.remain; });
     var tot = { remain: 0 }; BUD.POOL_IDS.forEach(function (id) { tot[id] = 0; }); tot.unified = 0;
     var sortBtns = '<div class="btn-group btn-group-sm">' + [['urgency', '급한 순'], ['remain', '잔액 순']].map(function (x) { return '<button type="button" class="btn ' + (state.budgetSort === x[0] ? 'btn-primary' : 'btn-outline-secondary') + '" data-action="budget-sort" data-sort="' + x[0] + '">' + x[1] + '</button>'; }).join('') + '</div>';
-    var table = '<div class="card-body py-2 border-bottom d-flex justify-content-between align-items-center flex-wrap gap-2"><div class="small text-secondary">잔액 = 행정 기준 잔액 − 기준일 이후 포털 집행 − 가할당(구매 심의·장비 도입 승인 중 미집행)</div>' + sortBtns + '</div>'
+    var table = '<div class="card-body py-2 border-bottom d-flex justify-content-between align-items-center flex-wrap gap-2"><div class="small text-secondary">잔액 = 행정 기준 잔액 − 기준일 이후 포털 집행 − 가할당(승인된 구매 심의 중 미집행)</div>' + sortBtns + '</div>'
       + '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th class="w-1"></th><th>과제</th><th class="w-1">종료</th>'
       + BUD.POOLS.map(function (c) { return '<th class="text-end">' + esc(c.label) + '</th>'; }).join('') + '<th class="text-end">합계</th></tr></thead><tbody>'
       + rows.map(function (x) {
@@ -1043,16 +1092,16 @@
     var list = state.requests.filter(function (r) { return r.status === 'done' && r.kind !== 'meeting'; })
       .sort(function (a, b) { return String(a.processedAt || a.createdAt).localeCompare(String(b.processedAt || b.createdAt)); });
     if (!list.length) { toast('처리된 구매 요청이 없습니다.', true); return; }
-    var head = ['날짜', '이름', '구매품목', '구매상세정보', '가격 (VAT포함)', '할당과제', '세목', '구매주기', '처리일', '처리자'];
+    var head = ['날짜', '이름', '구매품목', '구매상세정보', '가격 (VAT포함)', '할당과제', '세목', '구매주기', '팀', '컨펌', '관련 과제', '처리일', '처리자'];
     var rows = list.map(function (r) {
       var p = projectById(r.projectId);
       var d = localDate(r.createdAt).replace(/-/g, '').slice(2);
-      return [d, r.requesterName, r.item, r.note || (r.item + ', ' + (r.qty || 1) + 'EA'), Number(r.amount) || 0, p ? (p.alias || p.name) : '', catLabel(poolOf(r.category)), (r.meta && r.meta.cycle) || '', localDate(r.processedAt), r.processedBy || ''];
+      return [d, r.requesterName, r.item, r.note || (r.item + ', ' + (r.qty || 1) + 'EA'), Number(r.amount) || 0, p ? (p.alias || p.name) : '', catLabel(poolOf(r.category)), (r.meta && r.meta.cycle) || '', (r.meta && r.meta.team) || '', (r.meta && r.meta.confirmedBy) || '', relatedName(r), localDate(r.processedAt), r.processedBy || ''];
     });
     var name = 'DSIL_구매기록_' + localDate(new Date().toISOString()).replace(/-/g, '').slice(2);
     if (window.XLSX) {
       var ws = window.XLSX.utils.aoa_to_sheet([head].concat(rows));
-      ws['!cols'] = [{ wch: 8 }, { wch: 8 }, { wch: 24 }, { wch: 40 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 11 }, { wch: 8 }];
+      ws['!cols'] = [{ wch: 8 }, { wch: 8 }, { wch: 24 }, { wch: 40 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 8 }, { wch: 12 }, { wch: 14 }, { wch: 11 }, { wch: 8 }];
       var wb = window.XLSX.utils.book_new(); window.XLSX.utils.book_append_sheet(wb, ws, '구매기록');
       window.XLSX.writeFile(wb, name + '.xlsx');
     } else {
@@ -1437,7 +1486,10 @@
       + '<div class="col-6"><label class="form-label required">수량</label><input type="number" class="form-control" name="qty" min="1" step="1" required value="' + esc(r.qty) + '"></div>'
       + '<div class="col-6"><label class="form-label required">단가 (원)</label><input type="number" class="form-control" name="unitPrice" min="0" step="1" required value="' + esc(r.unitPrice) + '"></div>'
       + '<div class="col-12"><label class="form-label">사용 용도 <span class="form-label-description">어떤 용도로 쓰는지 상세히</span></label><textarea class="form-control" name="note" rows="3">' + esc(r.note) + '</textarea></div>'
-      + (r.kind !== 'meeting' ? '<div class="col-sm-6"><label class="form-label">구매 주기</label><select class="form-select" name="cycle">' + cycleOptions((r.meta && r.meta.cycle) || '') + '</select></div>' : '')
+      + (r.kind !== 'meeting' ? '<div class="col-sm-6"><label class="form-label">구매 주기</label><select class="form-select" name="cycle">' + cycleOptions((r.meta && r.meta.cycle) || '') + '</select></div>'
+        + '<div class="col-sm-6"><label class="form-label">팀</label><select class="form-select" name="team">' + teamOptions((r.meta && r.meta.team) || '') + '</select></div>'
+        + '<div class="col-sm-6"><label class="form-label">컨펌한 사람</label><input type="text" class="form-control" name="confirmedBy" value="' + esc((r.meta && r.meta.confirmedBy) || '') + '"></div>'
+        + '<div class="col-sm-6"><label class="form-label">가장 관련 있는 과제</label><select class="form-select" name="relatedProjectId">' + relatedOptions(r.meta && r.meta.relatedUnknown ? 'unknown' : ((r.meta && r.meta.suggestedProjectId) || '')) + '</select></div>' : '')
       + (admin ? '<div class="col-12"><label class="form-label">관리자 메모 <span class="form-label-description">반려 시 신청자에게 표시</span></label><input type="text" class="form-control" name="adminNote" value="' + esc(r.adminNote) + '"></div>' : '')
       + '</div>';
     return dialog({ title: '요청 수정', bodyHtml: body, size: 'lg', okLabel: '저장' }).then(function (v) {
@@ -1445,7 +1497,10 @@
       var qty = Math.max(1, parseInt(v.qty, 10) || 1);
       var unit = Math.max(0, Math.round(Number(v.unitPrice) || 0));
       var patch = { item: v.item.trim(), category: normCat(v.category), link: v.link.trim(), qty: qty, unitPrice: unit, amount: qty * unit, note: v.note.trim() };
-      if (v.cycle !== undefined) patch.meta = Object.assign({}, r.meta || {}, { cycle: v.cycle });
+      if (v.cycle !== undefined) {
+        patch.meta = Object.assign({}, r.meta || {}, { cycle: v.cycle, team: v.team, confirmedBy: (v.confirmedBy || '').trim(), confirmRoute: needsProfessor(qty * unit) ? 'professor' : 'team',
+          suggestedProjectId: v.relatedProjectId === 'unknown' ? '' : v.relatedProjectId, relatedUnknown: v.relatedProjectId === 'unknown' });
+      }
       if (admin) patch.adminNote = v.adminNote.trim();
       return store.updateRequest(id, patch).then(function () { toast('요청을 수정했습니다.'); touchUnlock(); return refresh(); });
     });
@@ -1457,12 +1512,12 @@
     return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }
   function exportCsv(list) {
-    var head = ['요청일', '신청자', '품명', '비목', '수량', '단가', '합계', '상태', '배정 과제', '과제번호', '연결 심의', '처리일', '처리자', '사용 용도', '구매 주기', '반려 사유', '링크'];
+    var head = ['요청일', '신청자', '품명', '비목', '수량', '단가', '합계', '상태', '배정 과제', '과제번호', '연결 심의', '처리일', '처리자', '사용 용도', '구매 주기', '팀', '컨펌한 사람', '관련 과제', '반려 사유', '링크'];
     var rows = list.map(function (r) {
       var p = r.projectId ? projectById(r.projectId) : null;
       var rv = r.reviewId ? reviewById(r.reviewId) : null;
       return [localDate(r.createdAt), r.requesterName, r.item, catLabel(normCat(r.category)), r.qty, r.unitPrice, r.amount,
-        (STATUS[r.status] || { label: r.status }).label, p ? p.name : '', p ? p.code : '', rv ? rv.title : (r.reviewId ? '연결됨' : ''), localDate(r.processedAt), r.processedBy || '', r.note, (r.meta && r.meta.cycle) || '', r.status === 'rejected' ? r.adminNote : '', r.link].map(csvCell).join(',');
+        (STATUS[r.status] || { label: r.status }).label, p ? p.name : '', p ? p.code : '', rv ? rv.title : (r.reviewId ? '연결됨' : ''), localDate(r.processedAt), r.processedBy || '', r.note, (r.meta && r.meta.cycle) || '', (r.meta && r.meta.team) || '', (r.meta && r.meta.confirmedBy) || '', relatedName(r), r.status === 'rejected' ? r.adminNote : '', r.link].map(csvCell).join(',');
     });
     var q = state.query;
     var name = 'dsil-requests-' + (q.from || 'all') + '_' + (q.to || 'all') + '.csv';
@@ -1526,9 +1581,14 @@
         { name: 'item', label: '품명', ok: !!r.item.trim() },
         { name: 'unitPrice', label: '단가', ok: String(r.unitPrice).trim() !== '' && Number(r.unitPrice) >= 0 },
         { name: 'note', label: '사용 용도(' + USAGE_MIN + '자 이상으로 상세히)', ok: r.note.trim().length >= USAGE_MIN },
-        { name: 'cycle', label: '구매 주기', ok: !!r.cycle }
+        { name: 'cycle', label: '구매 주기', ok: !!r.cycle },
+        { name: 'team', label: '팀', ok: !!r.team },
+        { name: 'confirmedBy', label: '컨펌한 사람', ok: !!r.confirmedBy.trim() },
+        { name: 'relatedProjectId', label: '가장 관련 있는 과제', ok: !!r.relatedProjectId }
       ])) return;
-      store.createRequest({ item: r.item.trim(), category: normCat(r.category), link: r.link.trim(), qty: qty, unitPrice: unit, amount: qty * unit, note: r.note.trim(), reviewId: r.reviewId || null, meta: { cycle: r.cycle } })
+      var meta = { cycle: r.cycle, team: r.team, confirmedBy: r.confirmedBy.trim(), confirmRoute: needsProfessor(qty * unit) ? 'professor' : 'team',
+        suggestedProjectId: r.relatedProjectId === 'unknown' ? '' : r.relatedProjectId, relatedUnknown: r.relatedProjectId === 'unknown' };
+      store.createRequest({ item: r.item.trim(), category: normCat(r.category), link: r.link.trim(), qty: qty, unitPrice: unit, amount: qty * unit, note: r.note.trim(), reviewId: r.reviewId || null, meta: meta })
         .then(function () { toast('요청을 제출했습니다. 관리자 처리 후 상태가 바뀝니다.'); return refresh(); })
         .catch(handleError);
     }
@@ -1576,6 +1636,7 @@
       var unit = Math.max(0, Number(rf.unitPrice.value) || 0);
       rf.amountView.value = won(qty * unit);
       var tier = $('#request-tier'); if (tier) tier.innerHTML = qty * unit > 0 ? '적용 절차 ' + tierBadge(qty * unit) : '';
+      var guide = $('#confirm-guide'); if (guide) guide.innerHTML = confirmGuideHtml(qty * unit);
       return;
     }
     var vf = e.target.closest('#review-form');
@@ -1593,6 +1654,11 @@
     var el = e.target;
     var action = el.getAttribute('data-action');
     var role = el.getAttribute('data-role');
+    /* 팀을 고르면 그 팀 중간관리자 이름을 채움 (비어 있거나 다른 팀 중간관리자로 채워져 있을 때만) */
+    if (el.name === 'team' && el.form && el.form.elements.confirmedBy) {
+      var cb = el.form.elements.confirmedBy, mgrs = PR.teams.map(function (t) { return t.manager; }).filter(Boolean);
+      if (teamManager(el.value) && (!cb.value.trim() || mgrs.indexOf(cb.value.trim()) >= 0)) cb.value = teamManager(el.value);
+    }
     var qf = el.closest('#query-form');
     if (qf && el.name !== 'q') { applyQueryForm(qf); render(); return; }
     var xf = el.closest('#export-form');
