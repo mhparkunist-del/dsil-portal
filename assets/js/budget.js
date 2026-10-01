@@ -15,6 +15,8 @@
   var store = window.DSILStore.create(CFG);
   var UNLOCK_KEY = 'dsil-budget-admin-unlock';
   var TABS = ['requests', 'query', 'review', 'admin'];
+  var PR = Object.assign({ cycles: ['일회성', '매월', '비정기(필요할 때마다)'], usageMinLength: 10 }, CFG.purchaseRequest || {});
+  var USAGE_MIN = Number(PR.usageMinLength) || 0;
   var URG = {
     must: { label: '올해 소진 필요', cls: 'bg-red-lt', dot: 'bg-red' },
     soon: { label: '종료 임박', cls: 'bg-orange-lt', dot: 'bg-orange' },
@@ -164,6 +166,24 @@
       return '<option value="' + esc(c.id) + '"' + (c.id === sel ? ' selected' : '') + '>' + esc(c.label) + '</option>';
     }).join('');
   }
+  function cycleOptions(selected) {
+    return '<option value="">선택…</option>' + PR.cycles.map(function (c) { return '<option value="' + esc(c) + '"' + (c === selected ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('')
+      + (selected && PR.cycles.indexOf(selected) < 0 ? '<option value="' + esc(selected) + '" selected>' + esc(selected) + '</option>' : '');
+  }
+  /* 빠진 항목은 빨간 테두리 + 토스트로 알림 (버튼은 잠그지 않음) */
+  function markMissing(form, checks) {
+    $all('.is-invalid', form).forEach(function (el) { el.classList.remove('is-invalid'); });
+    var miss = [], first = null;
+    checks.forEach(function (c) {
+      if (c.ok) return;
+      miss.push(c.label);
+      var el = form.querySelector('[name="' + c.name + '"]');
+      if (el) { el.classList.add('is-invalid'); if (!first) first = el; }
+    });
+    if (miss.length) { toast('빠진 항목: ' + miss.join(', '), true); if (first) first.focus(); }
+    return !miss.length;
+  }
+
   function tierOf(amount) {
     var a = Number(amount) || 0;
     for (var i = 0; i < TIERS.length; i++) {
@@ -453,7 +473,7 @@
     var body = '<div class="card-body"><div class="row g-4">'
       + '<div class="col-lg-7">'
       + '<h3 class="card-title mb-3"><i class="ti ti-cart-plus me-1 text-primary"></i>구매 요청 올리기</h3>'
-      + '<form id="request-form"><div class="row g-3">'
+      + '<form id="request-form" novalidate><div class="row g-3">'
       + '<div class="col-12"><label class="form-label required">품명</label><input type="text" class="form-control" name="item" required placeholder="예: 6인치 SiO2/Si 웨이퍼 25매"></div>'
       + '<div class="col-sm-5"><label class="form-label required">비목</label><select class="form-select" name="category">' + catOptions(CAT_IDS[0]) + '</select></div>'
       + '<div class="col-sm-7"><label class="form-label">구매처 / 링크</label><input type="url" class="form-control" name="link" placeholder="https://"></div>'
@@ -461,7 +481,12 @@
       + '<div class="col-4"><label class="form-label required">단가 (원)</label><input type="number" class="form-control" name="unitPrice" min="0" step="1" required placeholder="0"></div>'
       + '<div class="col-4"><label class="form-label">합계</label><input type="text" class="form-control tnum" name="amountView" readonly value="0원"></div>'
       + '<div class="col-12"><label class="form-label">관련 구매 심의 <span class="form-label-description">승인된 심의의 가할당에서 집행</span></label><select class="form-select" name="reviewId"' + (myApproved.length ? '' : ' disabled') + '>' + reviewSelect + '</select></div>'
-      + '<div class="col-12"><label class="form-label">용도 / 메모</label><textarea class="form-control" name="note" rows="2" placeholder="어떤 실험에 쓰는지, 급한지 등"></textarea></div>'
+      + '<div class="col-12"><label class="form-label required">사용 용도</label>'
+      + '<div class="alert alert-info py-2 mb-2 small"><i class="ti ti-info-circle me-1"></i><strong>어떤 용도로 쓰는지 상세히 적어 주세요.</strong> 어떤 실험·소자에, 어느 공정 단계에서, 얼마나 쓰는지를 적으면 관리자가 알맞은 과제를 배정하고 구매 보고서에도 그대로 쓸 수 있습니다.'
+      + '<div class="text-secondary mt-1">예: HfO2 FeFET 소자 10월 2차 공정 런 기판. 25매 중 20매 사용, 나머지는 11월 런 예비</div></div>'
+      + '<textarea class="form-control" name="note" rows="3" placeholder="어떤 실험에, 어떤 공정 단계에서, 얼마나 쓰는지 (급하면 필요한 날짜도)"></textarea></div>'
+      + '<div class="col-sm-6"><label class="form-label required">구매 주기</label><select class="form-select" name="cycle">' + cycleOptions('') + '</select>'
+      + '<div class="form-hint">같은 물품을 얼마나 자주 사는지</div></div>'
       + '</div><div class="d-flex justify-content-between align-items-center mt-3"><span class="small text-secondary" id="request-tier"></span><button type="submit" class="btn btn-primary"><i class="ti ti-send me-1"></i>요청 제출</button></div></form>'
       + '</div>'
       + '<div class="col-lg-5">'
@@ -557,7 +582,8 @@
     return '<div class="fw-medium">' + (r.kind === 'meeting' ? '<span class="badge bg-green-lt me-1">회의비</span>' : '') + esc(r.item)
       + (r.link ? ' <a href="' + esc(r.link) + '" target="_blank" rel="noopener" class="text-secondary" title="링크 열기"><i class="ti ti-external-link"></i></a>' : '') + '</div>'
       + '<div class="small text-secondary"><span class="badge badge-outline text-primary me-1">' + esc(catLabel(normCat(r.category))) + '</span>'
-      + (r.reviewId ? '<span class="badge bg-green-lt me-1" title="' + esc(rv ? rv.title : '') + '"><i class="ti ti-shield-check"></i> 심의</span>' : '') + esc(meetingSub || r.note || '')
+      + (r.reviewId ? '<span class="badge bg-green-lt me-1" title="' + esc(rv ? rv.title : '') + '"><i class="ti ti-shield-check"></i> 심의</span>' : '')
+      + (r.meta && r.meta.cycle ? '<span class="badge bg-secondary-lt me-1" title="구매 주기"><i class="ti ti-repeat me-1"></i>' + esc(r.meta.cycle) + '</span>' : '') + esc(meetingSub || r.note || '')
       + (sug && r.status === 'pending' ? '<span class="ms-1">· 청구 과제 ' + esc(sug.code || sug.name) + '</span>' : '') + '</div>'
       + (r.status === 'rejected' && r.adminNote ? '<div class="small text-danger">반려 사유: ' + esc(r.adminNote) + '</div>' : '');
   }
@@ -1017,16 +1043,16 @@
     var list = state.requests.filter(function (r) { return r.status === 'done' && r.kind !== 'meeting'; })
       .sort(function (a, b) { return String(a.processedAt || a.createdAt).localeCompare(String(b.processedAt || b.createdAt)); });
     if (!list.length) { toast('처리된 구매 요청이 없습니다.', true); return; }
-    var head = ['날짜', '이름', '구매품목', '구매상세정보', '가격 (VAT포함)', '할당과제', '세목', '처리일', '처리자'];
+    var head = ['날짜', '이름', '구매품목', '구매상세정보', '가격 (VAT포함)', '할당과제', '세목', '구매주기', '처리일', '처리자'];
     var rows = list.map(function (r) {
       var p = projectById(r.projectId);
       var d = localDate(r.createdAt).replace(/-/g, '').slice(2);
-      return [d, r.requesterName, r.item, r.note || (r.item + ', ' + (r.qty || 1) + 'EA'), Number(r.amount) || 0, p ? (p.alias || p.name) : '', catLabel(poolOf(r.category)), localDate(r.processedAt), r.processedBy || ''];
+      return [d, r.requesterName, r.item, r.note || (r.item + ', ' + (r.qty || 1) + 'EA'), Number(r.amount) || 0, p ? (p.alias || p.name) : '', catLabel(poolOf(r.category)), (r.meta && r.meta.cycle) || '', localDate(r.processedAt), r.processedBy || ''];
     });
     var name = 'DSIL_구매기록_' + localDate(new Date().toISOString()).replace(/-/g, '').slice(2);
     if (window.XLSX) {
       var ws = window.XLSX.utils.aoa_to_sheet([head].concat(rows));
-      ws['!cols'] = [{ wch: 8 }, { wch: 8 }, { wch: 24 }, { wch: 40 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 11 }, { wch: 8 }];
+      ws['!cols'] = [{ wch: 8 }, { wch: 8 }, { wch: 24 }, { wch: 40 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 11 }, { wch: 8 }];
       var wb = window.XLSX.utils.book_new(); window.XLSX.utils.book_append_sheet(wb, ws, '구매기록');
       window.XLSX.writeFile(wb, name + '.xlsx');
     } else {
@@ -1410,7 +1436,8 @@
       + '<div class="col-sm-7"><label class="form-label">구매처 / 링크</label><input type="url" class="form-control" name="link" value="' + esc(r.link) + '"></div>'
       + '<div class="col-6"><label class="form-label required">수량</label><input type="number" class="form-control" name="qty" min="1" step="1" required value="' + esc(r.qty) + '"></div>'
       + '<div class="col-6"><label class="form-label required">단가 (원)</label><input type="number" class="form-control" name="unitPrice" min="0" step="1" required value="' + esc(r.unitPrice) + '"></div>'
-      + '<div class="col-12"><label class="form-label">용도 / 메모</label><textarea class="form-control" name="note" rows="2">' + esc(r.note) + '</textarea></div>'
+      + '<div class="col-12"><label class="form-label">사용 용도 <span class="form-label-description">어떤 용도로 쓰는지 상세히</span></label><textarea class="form-control" name="note" rows="3">' + esc(r.note) + '</textarea></div>'
+      + (r.kind !== 'meeting' ? '<div class="col-sm-6"><label class="form-label">구매 주기</label><select class="form-select" name="cycle">' + cycleOptions((r.meta && r.meta.cycle) || '') + '</select></div>' : '')
       + (admin ? '<div class="col-12"><label class="form-label">관리자 메모 <span class="form-label-description">반려 시 신청자에게 표시</span></label><input type="text" class="form-control" name="adminNote" value="' + esc(r.adminNote) + '"></div>' : '')
       + '</div>';
     return dialog({ title: '요청 수정', bodyHtml: body, size: 'lg', okLabel: '저장' }).then(function (v) {
@@ -1418,6 +1445,7 @@
       var qty = Math.max(1, parseInt(v.qty, 10) || 1);
       var unit = Math.max(0, Math.round(Number(v.unitPrice) || 0));
       var patch = { item: v.item.trim(), category: normCat(v.category), link: v.link.trim(), qty: qty, unitPrice: unit, amount: qty * unit, note: v.note.trim() };
+      if (v.cycle !== undefined) patch.meta = Object.assign({}, r.meta || {}, { cycle: v.cycle });
       if (admin) patch.adminNote = v.adminNote.trim();
       return store.updateRequest(id, patch).then(function () { toast('요청을 수정했습니다.'); touchUnlock(); return refresh(); });
     });
@@ -1429,12 +1457,12 @@
     return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }
   function exportCsv(list) {
-    var head = ['요청일', '신청자', '품명', '비목', '수량', '단가', '합계', '상태', '배정 과제', '과제번호', '연결 심의', '처리일', '처리자', '메모', '반려 사유', '링크'];
+    var head = ['요청일', '신청자', '품명', '비목', '수량', '단가', '합계', '상태', '배정 과제', '과제번호', '연결 심의', '처리일', '처리자', '사용 용도', '구매 주기', '반려 사유', '링크'];
     var rows = list.map(function (r) {
       var p = r.projectId ? projectById(r.projectId) : null;
       var rv = r.reviewId ? reviewById(r.reviewId) : null;
       return [localDate(r.createdAt), r.requesterName, r.item, catLabel(normCat(r.category)), r.qty, r.unitPrice, r.amount,
-        (STATUS[r.status] || { label: r.status }).label, p ? p.name : '', p ? p.code : '', rv ? rv.title : (r.reviewId ? '연결됨' : ''), localDate(r.processedAt), r.processedBy || '', r.note, r.status === 'rejected' ? r.adminNote : '', r.link].map(csvCell).join(',');
+        (STATUS[r.status] || { label: r.status }).label, p ? p.name : '', p ? p.code : '', rv ? rv.title : (r.reviewId ? '연결됨' : ''), localDate(r.processedAt), r.processedBy || '', r.note, (r.meta && r.meta.cycle) || '', r.status === 'rejected' ? r.adminNote : '', r.link].map(csvCell).join(',');
     });
     var q = state.query;
     var name = 'dsil-requests-' + (q.from || 'all') + '_' + (q.to || 'all') + '.csv';
@@ -1494,8 +1522,13 @@
       var r = readForm(form);
       var qty = Math.max(1, parseInt(r.qty, 10) || 1);
       var unit = Math.max(0, Math.round(Number(r.unitPrice) || 0));
-      if (!r.item.trim()) { toast('품명을 입력하세요.', true); return; }
-      store.createRequest({ item: r.item.trim(), category: normCat(r.category), link: r.link.trim(), qty: qty, unitPrice: unit, amount: qty * unit, note: r.note.trim(), reviewId: r.reviewId || null })
+      if (!markMissing(form, [
+        { name: 'item', label: '품명', ok: !!r.item.trim() },
+        { name: 'unitPrice', label: '단가', ok: String(r.unitPrice).trim() !== '' && Number(r.unitPrice) >= 0 },
+        { name: 'note', label: '사용 용도(' + USAGE_MIN + '자 이상으로 상세히)', ok: r.note.trim().length >= USAGE_MIN },
+        { name: 'cycle', label: '구매 주기', ok: !!r.cycle }
+      ])) return;
+      store.createRequest({ item: r.item.trim(), category: normCat(r.category), link: r.link.trim(), qty: qty, unitPrice: unit, amount: qty * unit, note: r.note.trim(), reviewId: r.reviewId || null, meta: { cycle: r.cycle } })
         .then(function () { toast('요청을 제출했습니다. 관리자 처리 후 상태가 바뀝니다.'); return refresh(); })
         .catch(handleError);
     }

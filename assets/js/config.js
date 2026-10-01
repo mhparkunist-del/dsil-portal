@@ -84,6 +84,12 @@ window.DSIL_CONFIG = {
     { upTo: null,     label: '구매팀 입찰', cls: 'bg-red-lt',    desc: '2,000만원 이상 · 구매팀 입찰' }
   ],
 
+  /* 구매 요청: 구매 주기 선택지와 사용 용도 최소 글자 수 (관리자 배정·구매 보고서에 그대로 쓰임) */
+  purchaseRequest: {
+    cycles: ['일회성', '매주', '매월', '분기(3개월)', '반기(6개월)', '연 1회', '비정기(필요할 때마다)'],
+    usageMinLength: 10
+  },
+
   /* 구매 심의 열람 PIN 형식 (숫자 4~8자리) */
   reviewPinPattern: '\\d{4,8}',
 

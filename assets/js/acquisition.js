@@ -39,6 +39,7 @@
     name: '장비명', model: '제조사·모델', estAmount: '예상 금액', profConfirmed: '교수님 컨펌', profConfirmedAt: '컨펌 날짜', purpose: '사용 의도',
     targetDate: '주요 도입 시기', timelineNote: '도입 일정 메모', stage: '진행 단계', bidRequired: '입찰 대상', bidFailCount: '유찰 회차',
     payments: '결제 방법', utilities: '필요 유틸리티', location: '배치 위치', note: '비고', purchaserName: '장비 구매 담당자', pin: '장비 등록 비밀번호',
+    confirmedBy: '컨펌한 사람', relatedProjectId: '관련 과제',
     status: '상태', approval: '승인 결제 항목'
   };
   var ACTION_LABEL = { request: '도입 신청', create: '직접 등록', confirm: '신청 확인·등록', reject: '신청 반려', update: '수정', approve: '승인', revoke: '승인 취소', 'approval-reject': '승인 반려', status: '상태 변경' };
@@ -105,6 +106,10 @@
     }).join('');
     return chips || '<span class="text-secondary small">없음</span>';
   }
+  function relatedLabel(a) {
+    var p = a.relatedProjectId ? projectById(a.relatedProjectId) : null;
+    return p ? '<span title="' + esc(p.name) + '">' + esc(p.alias || p.name) + '</span>' : '-';
+  }
   function fmtMonth(s) { return s ? esc(String(s).replace('-', '.')) : '-'; }
   function payText(p) {
     var pr = projectById(p.projectId);
@@ -118,6 +123,7 @@
     if (field === 'stage') return stageOf(v).label;
     if (field === 'status') return (STATUS[v] || { label: v }).label;
     if (field === 'targetDate') return String(v).replace('-', '.');
+    if (field === 'relatedProjectId') { var rp = projectById(v); return rp ? (rp.alias || rp.name) : '(삭제된 과제)'; }
     if (field === 'payments' || field === 'approval') return Array.isArray(v) && v.length ? v.map(payText).join(' / ') : '(없음)';
     if (field === 'utilities') {
       var parts = ACQ.utilities.map(function (x) { var s = v[x.id]; return s && s.state !== 'none' ? x.label + ' ' + UTIL_STATE[s.state].label + (s.note ? '(' + s.note + ')' : '') : ''; }).filter(Boolean);
@@ -290,6 +296,7 @@
       + dg('주요 도입 시기', fmtMonth(a.targetDate) + (a.timelineNote ? '<div class="small text-secondary">' + esc(a.timelineNote) + '</div>' : ''))
       + dg('제조사·모델', esc(a.model || '-')) + dg('배치 위치', esc(a.location || '-'))
       + dg('신청', esc(a.requestedBy || '-') + ' · ' + fmtDate(a.createdAt)) + dg('확인·등록', a.registeredBy ? esc(a.registeredBy) + (a.confirmedAt ? ' · ' + fmtDate(a.confirmedAt) : '') : '-')
+      + dg('컨펌한 사람', esc(a.confirmedBy || '-')) + dg('관련 과제', relatedLabel(a))
       + '</div>'
       + '<div class="mb-3"><div class="subheader mb-1">사용 의도</div><div class="text-pre-wrap">' + esc(a.purpose || '-') + '</div></div>'
       + '<div class="mb-3"><div class="subheader mb-1">필요 유틸리티</div><table class="table table-sm mb-0"><tbody>' + ACQ.utilities.map(function (x) {
@@ -317,7 +324,11 @@
       + '<div class="col-12"><label class="form-label required">사용 의도</label><textarea class="form-control" name="purpose" rows="3" placeholder="어떤 연구에 어떻게 쓸 장비인지, 기존 장비로 안 되는 이유 등">' + esc(a.purpose || '') + '</textarea></div>'
       + '<div class="col-md-4"><label class="form-label required">주요 도입 시기</label><input type="month" class="form-control" name="targetDate" value="' + esc(a.targetDate || '') + '" placeholder="2026-12"></div>'
       + '<div class="col-md-8"><label class="form-label">도입 일정 메모</label><input type="text" class="form-control" name="timelineNote" value="' + esc(a.timelineNote || '') + '" placeholder="예: 연말 과제 종료 전 계약 필요"></div>'
-      + (canAssign ? '<div class="col-12"><hr class="my-1"></div>'
+      + (canAssign ? '<div class="col-12"><hr class="my-1"><div class="subheader mt-2"><i class="ti ti-user-check me-1"></i>중간 담당자 확인</div></div>'
+        + '<div class="col-md-5"><label class="form-label' + (assign ? ' required' : '') + '">컨펌한 사람</label><input type="text" class="form-control" name="confirmedBy" list="acq-confirmers" value="' + esc(a.confirmedBy || '') + '" placeholder="예: 박민호 교수님">'
+        + '<datalist id="acq-confirmers">' + names + '</datalist><div class="form-hint">이 도입 건을 누구에게 컨펌받았는지 이름을 적어 주세요.</div></div>'
+        + '<div class="col-md-7"><label class="form-label' + (assign ? ' required' : '') + '">가장 관련 있는 과제</label><select class="form-select" name="relatedProjectId">' + projectOptions(a.relatedProjectId || '') + '</select>'
+        + '<div class="form-hint">장비를 주로 쓰는 연구와 가장 가까운 과제. 결제 과제를 정할 때 기본값으로 쓰입니다.</div></div>'
         + '<div class="col-md-4"><label class="form-label' + (assign ? ' required' : '') + '">장비 구매 담당자</label><input type="text" class="form-control" name="purchaserName" list="acq-names" value="' + esc(a.purchaserName || '') + '" placeholder="포털 로그인 이름"><datalist id="acq-names">' + names + '</datalist>'
         + '<div class="form-hint">이 이름으로 로그인한 사람만 진행 상황을 갱신할 수 있습니다.</div></div>'
         + '<div class="col-md-4"><label class="form-label' + (assign ? ' required' : '') + '">장비 등록 비밀번호' + (assign ? '' : ' <span class="form-label-description">바꿀 때만</span>') + '</label><input type="password" class="form-control" name="pin" inputmode="numeric" autocomplete="new-password" placeholder="숫자 4~8자리"></div>'
@@ -345,8 +356,11 @@
 
   function readReg(form) {
     var v = readForm(form);
+    var fields = { name: v.name, model: v.model, estAmount: Number(v.estAmount) || 0, profConfirmed: !!v.profConfirmed, profConfirmedAt: v.profConfirmedAt, purpose: v.purpose, targetDate: v.targetDate, timelineNote: v.timelineNote };
+    if (v.confirmedBy !== undefined) fields.confirmedBy = String(v.confirmedBy).trim();
+    if (v.relatedProjectId !== undefined) fields.relatedProjectId = v.relatedProjectId;
     return {
-      fields: { name: v.name, model: v.model, estAmount: Number(v.estAmount) || 0, profConfirmed: !!v.profConfirmed, profConfirmedAt: v.profConfirmedAt, purpose: v.purpose, targetDate: v.targetDate, timelineNote: v.timelineNote },
+      fields: fields,
       purchaserName: v.purchaserName !== undefined ? String(v.purchaserName).trim() : undefined, pin: v.pin || '', pin2: v.pin2 || ''
     };
   }
@@ -361,6 +375,10 @@
       { ok: !!String(r.fields.purpose).trim(), name: 'purpose', label: '사용 의도' },
       { ok: /^\d{4}-\d{2}$/.test(r.fields.targetDate || ''), name: 'targetDate', label: '주요 도입 시기' }
     ];
+    if (assign) {
+      checks.push({ ok: !!r.fields.confirmedBy, name: 'confirmedBy', label: '컨펌한 사람' });
+      checks.push({ ok: !!r.fields.relatedProjectId, name: 'relatedProjectId', label: '관련 과제' });
+    }
     if (r.purchaserName !== undefined) checks.push({ ok: !!r.purchaserName, name: 'purchaserName', label: '장비 구매 담당자' });
     if (assign || r.pin) {
       checks.push({ ok: /^\d{4,8}$/.test(r.pin), name: 'pin', label: '장비 등록 비밀번호(숫자 4~8자리)' });
@@ -427,7 +445,8 @@
       : ap === 'approved' ? '<div class="alert alert-success py-2 mb-3"><i class="ti ti-circle-check me-1"></i>관리자가 결제 항목을 승인했습니다. 결제 항목을 바꾸면 재승인이 필요합니다.</div>'
       : ap === 'rejected' ? '<div class="alert alert-danger py-2 mb-3"><i class="ti ti-circle-x me-1"></i>관리자가 승인을 반려했습니다' + (a.approval && a.approval.note ? ': ' + esc(a.approval.note) : '.') + ' 결제 항목을 고쳐 저장하세요.</div>'
       : '<div class="alert alert-info py-2 mb-3"><i class="ti ti-info-circle me-1"></i>결제 항목은 관리자가 승인해야 과제 예산에 반영됩니다. 남은 예산과 관계없이 계획대로 적어 주세요.</div>';
-    var pays = (a.payments && a.payments.length) ? a.payments : [{}];
+    /* 결제 항목이 비어 있으면 첫 행 과제는 중간 담당자가 고른 관련 과제로 */
+    var pays = (a.payments && a.payments.length) ? a.payments : [{ projectId: a.relatedProjectId || '' }];
     return '<form id="prog-form" data-id="' + esc(a.id) + '" data-who="' + esc(who) + '" novalidate>' + apNote
       + '<h4 class="mb-2"><i class="ti ti-progress me-1 text-primary"></i>진행 단계</h4>' + stageSteps(a)
       + '<div class="row g-3 mb-4">'
@@ -576,8 +595,8 @@
     }).join('') + '</tbody></table></div>';
     body2 += '<h3 class="card-title mb-2"><i class="ti ti-list-check me-1 text-primary"></i>진행 중 <span class="text-secondary fw-normal">' + active.length + '건</span></h3>';
     if (!active.length) body2 += '<div class="text-secondary small">진행 중인 건이 없습니다.</div>';
-    else body2 += '<div class="table-responsive"><table class="table table-vcenter"><thead><tr><th>장비</th><th>진행 단계</th><th>구매 담당자</th><th>등록</th><th class="w-1"></th></tr></thead><tbody>' + active.map(function (a) {
-      return '<tr><td class="fw-medium">' + esc(a.name) + '</td><td>' + stageBadge(a) + '</td><td>' + esc(a.purchaserName) + '</td><td class="small text-secondary text-nowrap">' + esc(a.registeredBy || '-') + '</td>'
+    else body2 += '<div class="table-responsive"><table class="table table-vcenter"><thead><tr><th>장비</th><th>진행 단계</th><th>구매 담당자</th><th>관련 과제</th><th>컨펌 · 등록</th><th class="w-1"></th></tr></thead><tbody>' + active.map(function (a) {
+      return '<tr><td class="fw-medium">' + esc(a.name) + '</td><td>' + stageBadge(a) + '</td><td>' + esc(a.purchaserName) + '</td><td>' + relatedLabel(a) + '</td><td class="small text-secondary text-nowrap">' + esc(a.confirmedBy || '-') + ' 컨펌<div>' + esc(a.registeredBy || '-') + ' 등록</div></td>'
         + '<td class="text-nowrap"><button type="button" class="btn btn-sm" data-action="mid-edit" data-id="' + esc(a.id) + '"><i class="ti ti-edit me-1"></i>등록 정보</button></td></tr>';
     }).join('') + '</tbody></table></div>';
     return { body: body2 + '</div>' };

@@ -1164,7 +1164,7 @@ create or replace function public.acq_pick(p_data jsonb, p_keys text[]) returns 
   select coalesce(jsonb_object_agg(key, value), '{}'::jsonb) from jsonb_each(coalesce(p_data, '{}'::jsonb)) where key = any(p_keys);
 $$;
 create or replace function public.acq_reg_keys() returns text[] language sql immutable as $$
-  select array['name', 'model', 'estAmount', 'profConfirmed', 'profConfirmedAt', 'purpose', 'targetDate', 'timelineNote'];
+  select array['name', 'model', 'estAmount', 'profConfirmed', 'profConfirmedAt', 'purpose', 'targetDate', 'timelineNote', 'confirmedBy', 'relatedProjectId'];
 $$;
 create or replace function public.acq_prog_keys() returns text[] language sql immutable as $$
   select array['estAmount', 'stage', 'bidRequired', 'bidFailCount', 'payments', 'utilities', 'location', 'note'];
@@ -1175,6 +1175,15 @@ begin
   if coalesce(trim(p_data->>'name'), '') = '' then v_miss := v_miss || '장비명'::text; end if;
   if coalesce(trim(p_data->>'purpose'), '') = '' then v_miss := v_miss || '사용 의도'::text; end if;
   if coalesce(trim(p_data->>'targetDate'), '') = '' then v_miss := v_miss || '주요 도입 시기'::text; end if;
+  if array_length(v_miss, 1) > 0 then raise exception '빠진 항목: %', array_to_string(v_miss, ', '); end if;
+end;
+$$;
+-- 중간 담당자 확인·등록 때 필수: 컨펌한 사람, 관련 과제
+create or replace function public.acq_check_mid(p_data jsonb) returns void language plpgsql immutable as $$
+declare v_miss text[] := '{}';
+begin
+  if coalesce(trim(p_data->>'confirmedBy'), '') = '' then v_miss := v_miss || '컨펌한 사람'::text; end if;
+  if coalesce(trim(p_data->>'relatedProjectId'), '') = '' then v_miss := v_miss || '관련 과제'::text; end if;
   if array_length(v_miss, 1) > 0 then raise exception '빠진 항목: %', array_to_string(v_miss, ', '); end if;
 end;
 $$;
@@ -1217,6 +1226,7 @@ begin
   v_who := public.acq_actor(null, jsonb_build_object('managerId', p_manager_id, 'pin', p_pin));
   v_data := public.acq_pick(p_data, public.acq_reg_keys());
   perform public.acq_check_required(v_data);
+  perform public.acq_check_mid(v_data);
   if coalesce(trim(p_purchaser), '') = '' then raise exception '빠진 항목: 장비 구매 담당자'; end if;
   if coalesce(p_item_pin, '') !~ '^\d{4,8}$' then raise exception '장비 등록 비밀번호는 숫자 4~8자리입니다.'; end if;
   insert into public.equipment_acquisitions (status, requested_by, registered_by, confirmed_at, purchaser_name, pin_hash, data)
@@ -1237,6 +1247,7 @@ begin
   if v_a.status <> 'requested' then raise exception '확인 대기 중인 신청이 아닙니다.'; end if;
   v_patch := public.acq_pick(p_data, public.acq_reg_keys());
   perform public.acq_check_required(v_a.data || v_patch);
+  perform public.acq_check_mid(v_a.data || v_patch);
   if coalesce(trim(p_purchaser), '') = '' then raise exception '빠진 항목: 장비 구매 담당자'; end if;
   if coalesce(p_item_pin, '') !~ '^\d{4,8}$' then raise exception '장비 등록 비밀번호는 숫자 4~8자리입니다.'; end if;
   for k in select key from jsonb_each(v_patch) loop

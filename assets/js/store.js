@@ -126,7 +126,7 @@
   /* ---------- 장비 도입 공통 규칙 ----------
      중간 담당자(acqManagers)가 신청을 확인·등록하면서 구매 담당자와 그 건의 PIN 을 정하고,
      구매 담당자는 로그인 이름 + 건 PIN 으로 진행 항목을 갱신. 관리자 승인분만 과제 예산에 반영 */
-  var ACQ_REG_FIELDS = ['name', 'model', 'estAmount', 'profConfirmed', 'profConfirmedAt', 'purpose', 'targetDate', 'timelineNote'];
+  var ACQ_REG_FIELDS = ['name', 'model', 'estAmount', 'profConfirmed', 'profConfirmedAt', 'purpose', 'targetDate', 'timelineNote', 'confirmedBy', 'relatedProjectId'];
   var ACQ_PROG_FIELDS = ['estAmount', 'stage', 'bidRequired', 'bidFailCount', 'payments', 'utilities', 'location', 'note'];
   var ACQ_UTIL_STATES = ['none', 'need', 'ready'];
   function acqCfg(cfg) {
@@ -147,6 +147,8 @@
     if ('purpose' in src) out.purpose = str(src.purpose);
     if ('targetDate' in src) out.targetDate = str(src.targetDate);
     if ('timelineNote' in src) out.timelineNote = str(src.timelineNote);
+    if ('confirmedBy' in src) out.confirmedBy = str(src.confirmedBy);            /* 중간 담당자가 적는 컨펌해 준 사람 */
+    if ('relatedProjectId' in src) out.relatedProjectId = str(src.relatedProjectId); /* 가장 관련 있는 과제 (결제 과제와 별개) */
     if ('stage' in src) { var ids = acqStageIds(cfg); out.stage = ids.indexOf(src.stage) >= 0 ? src.stage : ids[0]; }
     if ('bidRequired' in src) out.bidRequired = !!src.bidRequired;
     if ('bidFailCount' in src) out.bidFailCount = Math.max(0, Math.floor(Number(src.bidFailCount) || 0));
@@ -168,7 +170,7 @@
     return out;
   }
   function acqDefaults(cfg) {
-    return normAcqFields({ name: '', model: '', estAmount: 0, profConfirmed: false, profConfirmedAt: '', purpose: '', targetDate: '', timelineNote: '',
+    return normAcqFields({ name: '', model: '', estAmount: 0, profConfirmed: false, profConfirmedAt: '', purpose: '', targetDate: '', timelineNote: '', confirmedBy: '', relatedProjectId: '',
       stage: acqStageIds(cfg)[0], bidRequired: false, bidFailCount: 0, payments: [], utilities: {}, location: '', note: '' }, cfg);
   }
   /* 바뀐 필드만 [{field, before, after}] */
@@ -186,6 +188,13 @@
     if (!a.name) miss.push('장비명');
     if (!a.purpose) miss.push('사용 의도');
     if (!a.targetDate) miss.push('주요 도입 시기');
+    return miss;
+  }
+  /* 중간 담당자가 확인·등록할 때 꼭 채우는 항목 (구성원 신청 단계에서는 비워도 됨) */
+  function acqMidMissing(a) {
+    var miss = [];
+    if (!a.confirmedBy) miss.push('컨펌한 사람');
+    if (!a.relatedProjectId) miss.push('관련 과제');
     return miss;
   }
   function publicAcqManager(m) { return { id: m.id, name: m.name, createdAt: m.createdAt }; }
@@ -1561,6 +1570,7 @@
           var f = Object.assign(acqDefaults(cfg), normAcqFields(pick(fields, ACQ_REG_FIELDS), cfg));
           var miss = acqMissing(f);
           if (!str(assign && assign.purchaserName)) miss.push('장비 구매 담당자');
+          miss = miss.concat(acqMidMissing(f));
           if (miss.length) throw new Error('빠진 항목: ' + miss.join(', '));
           if (!acqPinOk(assign.pin)) throw new Error('장비 등록 비밀번호는 숫자 4~8자리입니다.');
           return hashPin(assign.pin).then(function (h) {
@@ -1585,6 +1595,7 @@
           var merged = Object.assign({}, a, f);
           var miss = acqMissing(merged);
           if (!str(assign && assign.purchaserName)) miss.push('장비 구매 담당자');
+          miss = miss.concat(acqMidMissing(merged));
           if (miss.length) throw new Error('빠진 항목: ' + miss.join(', '));
           if (!acqPinOk(assign.pin)) throw new Error('장비 등록 비밀번호는 숫자 4~8자리입니다.');
           return hashPin(assign.pin).then(function (h) {
