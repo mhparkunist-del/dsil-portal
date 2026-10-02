@@ -98,13 +98,14 @@ dsil-portal/
 |---|---|
 | `accounts` | 이름, PIN 해시(SHA-256), role(admin/member), status, signatureKey |
 | `projects` | 과제명, 과제번호(code), 세목별 기준 잔액(budgets), budgetBase(행정 현황 기준일·통합 잔액·집행 상태·소진 필요·집행 전 확인), alias(시트 약칭), participants, cardUsers, accountManager. owners 는 예전 값만 보존(사용 안 함) |
-| `requests` | 구매 요청과 회의비 청구. `kind`가 purchase/meeting. `report`에 보고서·회의록 JSON. 구매 요청 `meta`: cycle(구매 주기), team, confirmedBy, confirmRoute(team/professor), suggestedProjectId(관련 과제), relatedUnknown |
+| `requests` | 구매 요청과 회의비 청구. `kind`가 purchase/meeting. `report`에 보고서·회의록 JSON. 구매 요청 `meta`: cycle(구매 주기), history(new/repeat), prevPurchase, team, confirmedBy, confirmRoute(team/professor), suggestedProjectId(관련 과제), relatedUnknown, purchase{confirmedAt, confirmedBy}(구매 확정), cancelRequest{status, reason, …}(반려 신청) |
 | `reviews` | 구매 심의 (승인 시 가할당) |
 | `exports` | 보고서 내보내기 이력 (삭제 경로 없음) |
 | `equipment`, `reservations`, `usageLogs` | 장비, 예약, 사용 로그 |
 | `invManagers`, `invItems`, `invMoves` | 소모품 담당자, 품목, 입출고 |
 | `meetingLogs`, `security` | 회의비 처리 로그, 보안 이벤트 (추가만) |
 | `participationRows`, `participationImport` | 참여과제 시트 원본과 가져오기 정보 |
+| `purchaseHistory` | 구매 이력 시트. 구매 확정 때 확정 시점 스냅샷이 자동 추가, 관리자 삭제 버튼으로만 삭제, 일회성 초기화에도 유지 |
 | `dataResetId` | 적용된 일회성 초기화 id |
 
 예산 계산 (`budget-core.js` 한 곳에서만): **잔액 = 기준 잔액 − 기준일 이후 실집행 − 가할당**.
@@ -112,6 +113,7 @@ dsil-portal/
 - **세목(pool)**: `budgetCategories` 중 `pool` 이 없는 비목 = 연구재료비·연구활동비·연구시설·장비비 (행정 현황과 같음). 회의비(`meeting`)는 `pool: 'activity'` 라 연구활동비에서, 기타는 연구재료비에서 차감됩니다. 비목 선택 화면에는 세목 3개만 나옵니다.
 - **기준 잔액**: 관리자가 행정 연구비 현황 엑셀을 올리면 `projects.budgets` 에 그 날짜의 세목별 **잔액**이, `projects.budgetBase.date` 에 기준일이 들어갑니다. 기준일 이전에 처리한 건은 이미 행정 잔액에 반영된 것으로 보고 빼지 않습니다. 기준일이 없는 과제(직접 입력)는 처리 건을 모두 뺍니다.
 - **통합 잔액**: 세목 구분 없는 과제(신임교원정착연구비)는 `budgetBase.unified` 하나에서 모든 비목이 차감됩니다.
+- **가처리**: 승인됐지만 구매 확정 전인 구매 요청 (기준일과 관계없이 차감). 구매 확정하면 확정일 기준으로 확정 차감. 회의비는 처리 즉시 확정.
 - **가할당**: 승인된 구매 심의 승인액 − 연결된 실집행.
 - **예산은 관리자만**: 화면은 관리자 PIN 이후에만 금액을 그리고, 공용 DB 에서는 `projects`(budgets·budget_base) 를 관리자만 읽습니다. 예전의 과제 담당자(owners) 열람은 없앴습니다.
 
@@ -123,7 +125,8 @@ dsil-portal/
 
 0. 컨펌: `purchaseRequest.professorThreshold`(500만원) 이하는 팀(CP·RF·Logic·Memory·DB) 중간관리자, 초과는 구매행정 시스템으로 교수님. 포털 밖에서 받고, 요청에 팀·컨펌한 사람을 적습니다 (포닥 검수자와 별개).
 1. 구성원이 구매 요청 (`status: pending`). 사용 용도(필수, `usageMinLength` 이상)·구매 주기·팀·컨펌한 사람·가장 관련 있는 과제(`meta.suggestedProjectId`, "모름" 가능).
-2. 관리자가 과제·비목을 배정 (`status: done`). 요청자 관련 과제가 기본 선택되고 ★로 맨 위에, 그 아래 추천 3개. 예산에서 실집행으로 차감.
+2. 관리자가 과제·비목을 골라 **승인**(항상 "승인하시겠습니까?" 팝업, `status: done`). 요청자 관련 과제가 기본 선택되고 ★로 맨 위에, 그 아래 추천 3개. 예산에는 **가처리**. 확정 전에는 관리자 승인 취소(→ pending), 구매자 반려 신청(`requestPurchaseCancel` → 관리자 `resolvePurchaseCancel`) 가능.
+2-1. 구매자가 보고서 화면에서 **구매 확정**(`confirmPurchase`): 보고서 저장 + `meta.purchase` + 구매 이력 시트 추가 → 예산 확정 차감. 확정 후에는 승인 취소·반려 신청 불가. 공용 DB 는 `confirm_purchase`·`request_purchase_cancel`·`resolve_purchase_cancel` 함수가 권한을 확인.
 3. 물품 도착 후 작성자가 보고서 작성. 영수증·거래내역 사진, 50만원 초과면 검수 사진 2장 이상.
 4. **검수 요청** (`report.status: submitted`, 화면 표시 "검수 대기").
 5. 포닥 검수자(`config.report.inspectors`: 조영민·정학순·이용우) 또는 관리자가 승인 (`verified`, "검수 완료"). 승인자 이름과 그 계정의 서명 이미지가 검수자 칸에 들어갑니다. 보완 요청 시 `draft`로 돌아갑니다.

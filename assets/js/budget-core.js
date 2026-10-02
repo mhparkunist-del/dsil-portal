@@ -5,7 +5,7 @@
                회의비처럼 pool 이 지정된 비목은 그 세목에서 차감.
    기준 잔액:  행정 연구비 현황 엑셀을 올리면 project.budgets 에 그 날짜의 잔액이,
                project.budgetBase 에 기준일·종료 구분·메모가 들어감.
-               잔액 = 기준 잔액 − 기준일 이후 처리된 집행 − 가할당(승인된 구매 심의 중 미집행)
+               잔액 = 기준 잔액 − 기준일 이후 확정 차감 − 가처리(승인됐지만 구매 확정 전) − 가할당(승인된 구매 심의 중 미집행)
                기준일 이전 처리 건은 행정 잔액에 이미 반영된 것으로 봄.
    통합 잔액:  세목 구분 없는 과제(budgetBase.unified 가 숫자)는 모든 비목이 한 잔액에서 차감.
    ===================================================================== */
@@ -52,6 +52,15 @@
     /* 기준일 이후 처리된 건만 실집행으로 차감 (기준일이 없는 과제는 전부) */
     function afterBase(p, when) { var b = base(p); return !b || localDate(when) > b.date; }
 
+    function isConfirmed(r) { return !!(r && r.meta && r.meta.purchase && r.meta.purchase.confirmedAt); }
+    function confirmedAt(r) { return (r.meta && r.meta.purchase && r.meta.purchase.confirmedAt) || r.processedAt || r.createdAt; }
+    /* 구매 요청 진행 상태: pending(미처리) → provisional(승인·가처리) → confirmed(구매 확정) / rejected */
+    function purchaseState(r) {
+      if (r.status === 'pending') return 'pending';
+      if (r.status === 'rejected') return 'rejected';
+      if (r.kind === 'meeting' || isConfirmed(r)) return 'confirmed';
+      return r.meta && r.meta.cancelRequest && r.meta.cancelRequest.status === 'pending' ? 'cancelRequested' : 'provisional';
+    }
     function reviewApproved(rv) { return Number(rv.approvedAmount !== null && rv.approvedAmount !== undefined ? rv.approvedAmount : rv.amount) || 0; }
 
     /* ctx = { requests, reviews(관리자 전체) } */
@@ -65,8 +74,12 @@
       function bucket(cat) { return unified ? u : pools[poolOf(cat)]; }
       var reqs = ctx.requests || [];
       reqs.forEach(function (r) {
-        if (r.status !== 'done' || r.projectId !== p.id || !afterBase(p, r.processedAt || r.createdAt)) return;
-        var b = bucket(r.category); b.actual += Number(r.amount) || 0; b.count++;
+        if (r.status !== 'done' || r.projectId !== p.id) return;
+        var b = bucket(r.category);
+        /* 구매 요청: 승인 후 구매 확정 전 = 가처리, 확정 = 확정 차감(확정일 기준). 회의비는 처리 즉시 확정 */
+        if (r.kind !== 'meeting' && !isConfirmed(r)) { b.provisional += Number(r.amount) || 0; b.pending = (b.pending || 0) + 1; return; }
+        if (!afterBase(p, confirmedAt(r))) return;
+        b.actual += Number(r.amount) || 0; b.count++;
       });
       (ctx.reviews || []).forEach(function (rv) {
         if (rv.status !== 'approved' || rv.projectId !== p.id) return;
@@ -141,7 +154,8 @@
     return {
       CATS: CATS, CAT_IDS: CAT_IDS, POOLS: POOLS, POOL_IDS: POOL_IDS, cfg: BC,
       normCat: normCat, poolOf: poolOf, catLabel: catLabel, base: base, isUnified: isUnified, isExcluded: isExcluded, excludedName: excludedName, isManaged: isManaged,
-      stats: stats, remainFor: remainFor, urgency: urgency, freshness: freshness, suggest: suggest, localDate: localDate, dayDiff: dayDiff
+      stats: stats, remainFor: remainFor, urgency: urgency, freshness: freshness, suggest: suggest, localDate: localDate, dayDiff: dayDiff,
+      isConfirmed: isConfirmed, purchaseState: purchaseState
     };
   }
 

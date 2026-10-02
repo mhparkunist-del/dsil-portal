@@ -285,7 +285,25 @@
       + (editable ? '<button type="button" class="btn" data-action="save-draft"><i class="ti ti-device-floppy me-1"></i>임시 저장</button><button type="button" class="btn btn-primary" data-action="submit"><i class="ti ti-send me-1"></i>' + (st === 'submitted' ? '다시 제출' : (isMeeting() ? '제출' : '검수 요청')) + '</button>' : '')
       + (canVerify() && st === 'submitted' ? '<button type="button" class="btn btn-outline-danger" data-action="return"><i class="ti ti-arrow-back-up me-1"></i>보완 요청</button><button type="button" class="btn btn-success" data-action="verify"><i class="ti ti-signature me-1"></i>' + (isMeeting() ? '검수 승인' : '검수 승인 (서명)') + '</button>' : '')
       + (canVerify() && st === 'verified' ? '<button type="button" class="btn btn-outline-secondary" data-action="return"><i class="ti ti-arrow-back-up me-1"></i>검수 취소</button>' : '')
-      + '</div></div>';
+      + '</div></div>' + purchaseBar(r);
+  }
+
+  /* 구매 확정: 승인(가처리) 상태의 구매 건을 구매자(또는 관리자)가 확정 → 보고서 저장 + 예산 확정 차감 + 구매 이력 시트 기록 */
+  function purchaseState(r) {
+    var m = r.meta || {};
+    if (m.purchase && m.purchase.confirmedAt) return 'confirmed';
+    if (m.cancelRequest && m.cancelRequest.status === 'pending') return 'cancelRequested';
+    return 'provisional';
+  }
+  function purchaseBar(r) {
+    if (isMeeting() || r.status !== 'done') return '';
+    var ps = purchaseState(r), m = r.meta || {};
+    if (ps === 'confirmed') return '<div class="card mt-3 border-success"><div class="card-body d-flex align-items-center gap-2"><i class="ti ti-circle-check fs-2 text-green"></i><div><div class="fw-medium">구매 확정 완료</div><div class="small text-secondary">' + fmtDateTime(m.purchase.confirmedAt) + ' · ' + esc(m.purchase.confirmedBy || '') + ' · 예산 차감이 확정되었고 구매 이력에 저장되었습니다.</div></div></div></div>';
+    if (ps === 'cancelRequested') return '<div class="card mt-3 border-warning"><div class="card-body small"><i class="ti ti-arrow-back-up me-1 text-orange"></i><strong>반려 신청 중</strong> · ' + esc(m.cancelRequest.reason) + ' — 관리자가 처리하면 구매 확정 또는 반려로 바뀝니다.</div></div>';
+    if (!isOwner() && !isAdminEligible()) return '<div class="card mt-3"><div class="card-body small text-secondary"><i class="ti ti-hourglass me-1"></i>승인 · 가처리 상태입니다. 요청자가 구매 확정을 누르면 예산 차감이 확정됩니다.</div></div>';
+    return '<div class="card mt-3 border-success"><div class="card-body d-flex flex-wrap align-items-center gap-2">'
+      + '<div class="me-auto"><div class="fw-medium"><i class="ti ti-shopping-cart-check me-1 text-green"></i>구매 확정</div><div class="small text-secondary">물품을 받고 보고서를 다 썼으면 구매를 확정하세요. 지금은 예산에 <strong>가처리</strong>된 상태이고, 확정하면 보고서가 저장되고 예산 차감이 확정되며 구매 이력에 자동으로 남습니다. 구매를 취소하려면 요청 조회에서 반려 신청을 넣으세요.</div></div>'
+      + '<button type="button" class="btn btn-success" data-action="confirm-purchase"><i class="ti ti-circle-check me-1"></i>구매 확정</button></div></div>';
   }
 
   /* ---------- 구매 보고서 편집 ---------- */
@@ -615,6 +633,22 @@
           return;
         }
         persist('submitted').then(function () { return meetingLog('minutes', '회의록 제출 · 영수증 ' + photoCount(state.form, 'receipt') + '장'); }).then(function () { toast(isMeeting() ? '회의록을 제출했습니다. 인쇄용 또는 DOCX 로 내려받아 정산에 쓰세요.' : '검수를 요청했습니다. 검수자(' + (inspectors().join(', ') || '포닥연구원') + ')가 승인하면 완료됩니다.'); }).catch(handleError);
+        break;
+      }
+      case 'confirm-purchase': {
+        var f = collectForm();
+        var missP = missingItems(f);
+        var r0 = state.request;
+        confirmDlg({
+          title: '구매를 확정하시겠습니까?',
+          message: '「' + r0.item + '」 ' + won(r0.amount) + ' 구매를 확정합니다. 보고서가 저장되고 예산 차감이 확정되며 구매 이력에 기록됩니다. 확정 후에는 반려 신청이나 승인 취소를 할 수 없습니다.'
+            + (missP.length ? ' (보고서에 아직 빈 항목: ' + missP.map(function (m) { return m.label; }).join(', ') + ' — 확정 뒤에도 보고서는 계속 고칠 수 있습니다.)' : ''),
+          okLabel: '구매 확정'
+        }).then(function (ok) {
+          if (!ok) return;
+          var payload = Object.assign({}, f, { status: reportStatus() === 'none' ? 'draft' : reportStatus() });
+          return store.confirmPurchase(state.id, payload).then(function () { toast('구매를 확정했습니다. 구매 이력에 저장되었습니다.'); return refresh(); });
+        }).catch(handleError);
         break;
       }
       case 'verify': {

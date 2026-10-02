@@ -14,7 +14,7 @@
   var PIN_RE = new RegExp('^' + (CFG.reviewPinPattern || '\\d{4,8}') + '$');
   var store = window.DSILStore.create(CFG);
   var UNLOCK_KEY = 'dsil-budget-admin-unlock';
-  var TABS = ['requests', 'query', 'review', 'admin'];
+  var TABS = ['requests', 'query', 'history', 'review', 'admin'];
   var PR = Object.assign({ teams: [], professorThreshold: 5000000, cycles: ['일회성', '매월', '비정기(필요할 때마다)'], usageMinLength: 10 }, CFG.purchaseRequest || {});
   var USAGE_MIN = Number(PR.usageMinLength) || 0;
   var PROF_MIN = Number(PR.professorThreshold) || 5000000;   /* 이 금액 초과: 교수님 컨펌 (구매행정) */
@@ -28,9 +28,23 @@
 
   var STATUS = {
     pending: { label: '미처리', cls: 'bg-yellow-lt' },
-    done: { label: '처리', cls: 'bg-blue-lt' },
+    done: { label: '승인', cls: 'bg-blue-lt' },
     rejected: { label: '반려', cls: 'bg-red-lt' }
   };
+  /* 구매 진행 상태 (budget-core purchaseState): 승인 후 구매 확정 전은 예산 가처리 */
+  var PSTATE = {
+    pending: { label: '미처리', cls: 'bg-yellow-lt' },
+    provisional: { label: '승인 · 가처리', cls: 'bg-blue-lt' },
+    cancelRequested: { label: '반려 신청 중', cls: 'bg-orange-lt' },
+    confirmed: { label: '구매 확정', cls: 'bg-green-lt' },
+    rejected: { label: '반려', cls: 'bg-red-lt' }
+  };
+  function stateBadge(r) {
+    var s = BUD.purchaseState(r);
+    if (r.kind === 'meeting' && s === 'confirmed') return '<span class="badge bg-blue-lt">처리</span>';
+    var S = PSTATE[s] || { label: s, cls: 'bg-secondary-lt' };
+    return '<span class="badge ' + S.cls + '">' + S.label + '</span>';
+  }
   var RSTATUS = {
     pending: { label: '심의 중', cls: 'bg-yellow-lt' },
     approved: { label: '승인', cls: 'bg-green-lt' },
@@ -62,7 +76,9 @@
     exports: [],
     exportFilter: { preset: 'month', from: '', to: '', projectId: 'all', includeRequests: true, includeReviews: true },
     exportSel: null,          /* null = 목록 전체 선택, 아니면 { key: true } */
-    exportPurpose: ''
+    exportPurpose: '',
+    history: [],              /* 구매 이력 시트 (구매 확정 때 자동 추가) */
+    historyQ: ''
   };
 
   /* ---------- helpers ---------- */
@@ -186,6 +202,38 @@
       return '<option value="' + esc(p.id) + '"' + (p.id === selected ? ' selected' : '') + ' title="' + esc(p.name) + '">' + esc((p.alias || p.name) + full) + '</option>';
     }).join('') + '<option value="unknown"' + (selected === 'unknown' ? ' selected' : '') + '>잘 모르겠음 (관리자가 판단)</option>';
   }
+  /* 이전 구매 이력: 구매 이력 시트 + 지금까지 승인된 구매 요청에서 품명이 겹치는 건 (공백·대소문자 무시) */
+  /* 품명을 낱말로 쪼개 3글자 이상 낱말이 하나라도 겹치면 같은 물품으로 봄 (수량·단위 낱말은 제외: 1L, 500mL, 25매 …) */
+  function itemTokens(s) {
+    return String(s || '').toLowerCase().split(/[\s\-_,.()\[\]/+·]+/).filter(function (t) {
+      return t.length >= 3 && !/^\d+(\.\d+)?(l|ml|g|kg|mg|ea|매|개|병|박스|box|set|m|mm|cm|inch|인치)?$/.test(t);
+    });
+  }
+  function previousPurchases(item) {
+    var mine = itemTokens(item);
+    if (!mine.length) return [];
+    function hit(name) { var ts = itemTokens(name); return ts.some(function (t) { return mine.indexOf(t) >= 0; }); }
+    var seen = {}, out = [];
+    state.history.forEach(function (h) {
+      if (!hit(h.item)) return;
+      seen[h.requestId] = 1;
+      out.push({ at: h.confirmedAt, by: h.requesterName, item: h.item, amount: h.amount, project: h.projectName, confirmed: true });
+    });
+    state.requests.forEach(function (r) {
+      if (r.kind === 'meeting' || r.status !== 'done' || seen[r.id] || !hit(r.item)) return;
+      var p = projectById(r.projectId);
+      out.push({ at: r.processedAt || r.createdAt, by: r.requesterName, item: r.item, amount: r.amount, project: p ? (p.alias || p.name) : '', confirmed: BUD.isConfirmed(r) });
+    });
+    return out.sort(function (a, b) { return String(b.at).localeCompare(String(a.at)); });
+  }
+  function historyHintHtml(item) {
+    var list = previousPurchases(item);
+    if (!list.length) return String(item || '').trim().length >= 3 ? '<span class="text-secondary"><i class="ti ti-search me-1"></i>포털에 이전 구매 이력이 없습니다.</span>' : '';
+    return '<div class="alert alert-azure py-2 mb-0"><i class="ti ti-history me-1"></i><strong>이전 구매 이력 ' + list.length + '건</strong>'
+      + list.slice(0, 3).map(function (x) { return '<div class="small">' + fmtDate(x.at) + ' · ' + esc(x.by) + ' · ' + esc(x.item) + ' · <span class="tnum">' + won(x.amount) + '</span>' + (x.project ? ' · ' + esc(x.project) : '') + (x.confirmed ? '' : ' <span class="text-secondary">(구매 확정 전)</span>') + '</div>'; }).join('')
+      + (list.length > 3 ? '<div class="small text-secondary">외 ' + (list.length - 3) + '건 · 구매 이력 탭에서 전체 보기</div>' : '') + '</div>';
+  }
+
   function relatedName(r) {
     if (r.kind === 'meeting' || !r.meta) return '';
     var p = r.meta.suggestedProjectId ? projectById(r.meta.suggestedProjectId) : null;
@@ -363,12 +411,14 @@
       store.listProjects(),
       store.listRequests(),
       state.session ? store.listReviews({ full: full }) : Promise.resolve([]),
-      full ? store.listExports() : Promise.resolve([])
+      full ? store.listExports() : Promise.resolve([]),
+      state.session && store.listPurchaseHistory ? store.listPurchaseHistory() : Promise.resolve([])
     ]).then(function (res) {
       state.projects = res[0];
       state.requests = res[1].slice().sort(byNewest);
       state.reviews = res[2].slice().sort(byNewest);
       state.exports = res[3].slice().sort(byNewest);
+      state.history = res[4] || [];
       state.reviewsFull = full;
       if (state.tab === 'budget') state.tab = 'admin';   /* 예전 주소(#budget) */
       if (state.tab === 'admin' && !isAdminActive()) state.tab = 'requests';
@@ -396,7 +446,7 @@
       html = '<div class="row row-deck row-cards mb-3">'
         + stat('미처리 구매건', sum.pendingCount + '건', won(sum.pendingAmount) + ' 대기 중', 'text-yellow', 'col-6 col-lg-3')
         + stat('심의 대기', sum.reviewPending + '건', '구매 심의 승인 대기', sum.reviewPending ? 'text-orange' : '', 'col-6 col-lg-3')
-        + stat('현재 잔액', won(sum.totalRemain), '기준 ' + won(sum.totalBudget) + ' − 집행 ' + won(sum.totalActual) + ' − 가할당 ' + won(sum.totalProvisional), 'text-primary', 'col-6 col-lg-3')
+        + stat('현재 잔액', won(sum.totalRemain), '기준 ' + won(sum.totalBudget) + ' − 집행 ' + won(sum.totalActual) + ' − 가처리·가할당 ' + won(sum.totalProvisional), 'text-primary', 'col-6 col-lg-3')
         + stat('올해 소진 필요', won(mustSpendSummary().total), mustSpendSummary().count + '개 과제 · 이월불가·종료', mustSpendSummary().total > 0 ? 'text-red' : '', 'col-6 col-lg-3')
         + '</div>';
     } else {
@@ -412,6 +462,7 @@
     if (view === 'admin' && !isAdminEligible()) view = 'requests';
     state.view = view;
     var tab = view === 'query' ? renderQueryTab()
+      : view === 'history' ? renderHistoryTab()
       : view === 'review' ? renderReviewTab()
       : view === 'admin' ? renderAdminTab()
       : renderRequestsTab();
@@ -419,6 +470,7 @@
     html += '<div class="card mb-3"><div class="card-header"><ul class="nav nav-tabs card-header-tabs" role="tablist">'
       + tabLink('requests', 'cart-plus', '구매 요청')
       + tabLink('query', 'list-search', '요청 조회')
+      + tabLink('history', 'history', '구매 이력', state.history.length ? '<span class="badge bg-green-lt ms-2">' + state.history.length + '</span>' : '')
       + tabLink('review', 'shield-check', '구매 심의', sum.my.rvPending && !isAdminActive() ? '<span class="badge bg-yellow-lt ms-2">' + sum.my.rvPending + '</span>' : '')
       + (isAdminEligible() ? tabLink('admin', state.adminUnlocked ? 'lock-open' : 'lock', '관리자 · 과제 예산', (sum.pendingCount + sum.reviewPending) && state.adminUnlocked ? '<span class="badge bg-yellow-lt ms-2">' + (sum.pendingCount + sum.reviewPending) + '</span>' : '') : '')
       + '</ul></div>' + tab.body + '</div>' + (tab.after || '');
@@ -489,10 +541,9 @@
       mineHtml = '<div class="text-secondary small">아직 올린 요청이 없습니다.</div>';
     } else {
       mineHtml = '<div class="list-group list-group-flush">' + mine.map(function (r) {
-        var st = STATUS[r.status] || { label: r.status, cls: 'bg-secondary-lt' };
         return '<div class="list-group-item px-0 d-flex justify-content-between align-items-center gap-2">'
           + '<div class="text-truncate"><span class="text-secondary small me-2">' + fmtDate(r.createdAt) + '</span>' + esc(r.item) + '</div>'
-          + '<div class="text-nowrap"><span class="tnum me-2">' + won(r.amount) + '</span>' + (r.status === 'done' ? reportBadge(r) : '<span class="badge ' + st.cls + '">' + st.label + '</span>') + '</div></div>';
+          + '<div class="text-nowrap"><span class="tnum me-2">' + won(r.amount) + '</span>' + stateBadge(r) + (r.status === 'done' ? ' ' + reportBadge(r) : '') + '</div></div>';
       }).join('') + '</div>';
     }
     var myApproved = state.reviews.filter(function (rv) { return isMine(rv) && rv.status === 'approved'; });
@@ -507,14 +558,19 @@
       + '<form id="request-form" novalidate><div class="row g-3">'
       + '<div class="col-12"><label class="form-label required">품명</label><input type="text" class="form-control" name="item" required placeholder="예: 6인치 SiO2/Si 웨이퍼 25매"></div>'
       + '<div class="col-sm-5"><label class="form-label required">비목</label><select class="form-select" name="category">' + catOptions(CAT_IDS[0]) + '</select></div>'
-      + '<div class="col-sm-7"><label class="form-label">구매처 / 링크</label><input type="url" class="form-control" name="link" placeholder="https://"></div>'
+      + '<div class="col-sm-7"><label class="form-label required">구매처 링크</label><input type="url" class="form-control" name="link" placeholder="https://"></div>'
+      + '<div class="col-12"><label class="form-label required">구매 이력</label><div class="d-flex flex-wrap gap-3">'
+      + '<label class="form-check mb-0"><input class="form-check-input" type="radio" name="history" value="new"><span class="form-check-label">신규 구매 (처음 사는 물품)</span></label>'
+      + '<label class="form-check mb-0"><input class="form-check-input" type="radio" name="history" value="repeat"><span class="form-check-label">재구매 (이전 구매 이력 있음)</span></label></div>'
+      + '<div id="history-hint" class="small mt-1"></div></div>'
       + '<div class="col-4"><label class="form-label required">수량</label><input type="number" class="form-control" name="qty" min="1" step="1" value="1" required></div>'
       + '<div class="col-4"><label class="form-label required">단가 (원)</label><input type="number" class="form-control" name="unitPrice" min="0" step="1" required placeholder="0"></div>'
       + '<div class="col-4"><label class="form-label">합계</label><input type="text" class="form-control tnum" name="amountView" readonly value="0원"></div>'
       + '<div class="col-12"><label class="form-label">관련 구매 심의 <span class="form-label-description">승인된 심의의 가할당에서 집행</span></label><select class="form-select" name="reviewId"' + (myApproved.length ? '' : ' disabled') + '>' + reviewSelect + '</select></div>'
       + '<div class="col-12"><label class="form-label required">사용 용도</label>'
       + '<div class="alert alert-info py-2 mb-2 small"><i class="ti ti-info-circle me-1"></i><strong>어떤 용도로 쓰는지 상세히 적어 주세요.</strong> 무엇을 위해 사는지 알 수 있으면 관리자가 알맞은 과제를 배정할 수 있습니다.'
-      + '<div class="text-secondary mt-1">예: 메탈 증착을 위한 증착기 유지보수용 오일 구매</div></div>'
+      + '<div class="text-secondary mt-1">예: ○○ 소자 제작 시 △△ 공정 단계에서 사용되는 □□ 케미컬</div>'
+      + '<div class="text-secondary">예: 메탈 증착을 위한 증착기 유지보수용 오일 구매</div></div>'
       + '<textarea class="form-control" name="note" rows="2" placeholder="예: 메탈 증착을 위한 증착기 유지보수용 오일 구매"></textarea></div>'
       + '<div class="col-sm-6"><label class="form-label required">구매 주기</label><select class="form-select" name="cycle">' + cycleOptions('') + '</select>'
       + '<div class="form-hint">같은 물품을 얼마나 자주 사는지</div></div>'
@@ -662,16 +718,26 @@
       html += '<td><span class="badge ' + st.cls + '">' + st.label + '</span></td>'
         + '<td><div class="d-flex flex-wrap gap-1"><select class="form-select form-select-sm" data-role="assign-project">' + projectOptions(r.amount, pre.cat, pre.projectId) + '</select>'
         + '<select class="form-select form-select-sm" data-role="assign-cat" style="min-width:7rem">' + catOptions(pre.cat) + '</select></div>' + cardUsersHint(pre.projectId) + '</td>'
-        + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-primary" data-action="assign">처리</button> '
+        + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-primary" data-action="assign">승인</button> '
         + '<button type="button" class="btn btn-sm btn-outline-danger" data-action="reject">반려</button> '
         + '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="edit-request" title="수정"><i class="ti ti-edit"></i></button></td>';
     } else {
-      html += '<td><span class="badge ' + st.cls + '">' + st.label + '</span>'
+      var ps = BUD.purchaseState(r);
+      var cr = r.meta && r.meta.cancelRequest;
+      var mineOpen = own && r.kind !== 'meeting' && ps === 'provisional';
+      html += '<td>' + stateBadge(r)
         + (r.processedAt ? '<div class="small text-secondary text-nowrap">' + fmtDate(r.processedAt) + (r.processedBy ? ' · ' + esc(r.processedBy) : '') + '</div>' : '')
+        + (ps === 'confirmed' && r.meta && r.meta.purchase ? '<div class="small text-green text-nowrap">확정 ' + fmtDate(r.meta.purchase.confirmedAt) + '</div>' : '')
+        + (ps === 'cancelRequested' ? '<div class="small text-orange">반려 신청: ' + esc(cr.reason) + '</div>' : '')
+        + (cr && cr.status === 'denied' && ps === 'provisional' ? '<div class="small text-secondary">반려 신청 거절' + (cr.resolvedNote ? ': ' + esc(cr.resolvedNote) : '') + '</div>' : '')
         + (r.status === 'done' ? '<div class="mt-1">' + reportBadge(r) + '</div>' : '') + '</td>'
         + '<td>' + (p ? '<div>' + esc(p.name) + '</div><div class="small text-secondary">' + esc(p.code) + '</div>' : '<span class="text-secondary">-</span>') + '</td>'
         + '<td class="text-end text-nowrap">'
-        + (admin && r.status !== 'pending' ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="reopen" title="미처리로 되돌리기"><i class="ti ti-arrow-back-up"></i></button>' : '')
+        + (mineOpen ? '<a class="btn btn-sm btn-success" href="../report/index.html#id=' + esc(r.id) + '" title="보고서를 쓰고 구매를 확정합니다"><i class="ti ti-circle-check me-1"></i>보고서 · 구매 확정</a> '
+          + '<button type="button" class="btn btn-sm btn-outline-danger" data-action="cancel-request">반려 신청</button> ' : '')
+        + (admin && r.status === 'rejected' ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="reopen" title="미처리로 되돌리기"><i class="ti ti-arrow-back-up"></i></button>' : '')
+        + (admin && r.kind !== 'meeting' && (ps === 'provisional' || ps === 'cancelRequested') ? '<button type="button" class="btn btn-sm btn-outline-secondary" data-action="revoke-approval" title="승인을 취소하고 미처리로 되돌림"><i class="ti ti-arrow-back-up me-1"></i>승인 취소</button> ' : '')
+        + (admin && r.kind === 'meeting' && r.status === 'done' ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="reopen" title="미처리로 되돌리기"><i class="ti ti-arrow-back-up"></i></button>' : '')
         + (canEdit ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="edit-request" title="수정"><i class="ti ti-edit"></i></button>' : '')
         + (canEdit ? '<button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="delete-request" title="' + (own && !admin ? '요청 취소' : '삭제') + '"><i class="ti ti-trash"></i></button>' : '')
         + '</td>';
@@ -921,7 +987,7 @@
     if (!b || (b.budget === 0 && b.actual === 0 && b.provisional === 0)) return '<td class="text-end text-secondary">-</td>';
     var used = b.actual + b.provisional;
     return '<td class="text-end tnum text-nowrap"><div class="fw-medium' + (b.remain < 0 ? ' text-danger' : '') + '">' + won(b.remain) + '</div>'
-      + (used ? '<div class="small text-secondary">기준 ' + won(b.budget) + (b.actual ? ' − 집행 ' + won(b.actual) : '') + (b.provisional ? ' − 가 ' + won(b.provisional) : '') + '</div>' : '') + '</td>';
+      + (used ? '<div class="small text-secondary">기준 ' + won(b.budget) + (b.actual ? ' − 확정 ' + won(b.actual) : '') + (b.provisional ? ' − 가처리 ' + won(b.provisional) : '') + '</div>' : '') + '</td>';
   }
 
   function renderBudgetDashboard() {
@@ -961,7 +1027,7 @@
       : function (a, b) { return a.u.rank - b.u.rank || (a.u.days === null ? 1e9 : a.u.days) - (b.u.days === null ? 1e9 : b.u.days) || b.s.remain - a.s.remain; });
     var tot = { remain: 0 }; BUD.POOL_IDS.forEach(function (id) { tot[id] = 0; }); tot.unified = 0;
     var sortBtns = '<div class="btn-group btn-group-sm">' + [['urgency', '급한 순'], ['remain', '잔액 순']].map(function (x) { return '<button type="button" class="btn ' + (state.budgetSort === x[0] ? 'btn-primary' : 'btn-outline-secondary') + '" data-action="budget-sort" data-sort="' + x[0] + '">' + x[1] + '</button>'; }).join('') + '</div>';
-    var table = '<div class="card-body py-2 border-bottom d-flex justify-content-between align-items-center flex-wrap gap-2"><div class="small text-secondary">잔액 = 행정 기준 잔액 − 기준일 이후 포털 집행 − 가할당(승인된 구매 심의 중 미집행)</div>' + sortBtns + '</div>'
+    var table = '<div class="card-body py-2 border-bottom d-flex justify-content-between align-items-center flex-wrap gap-2"><div class="small text-secondary">잔액 = 행정 기준 잔액 − 기준일 이후 구매 확정 − 가처리(승인 후 구매 확정 전) − 가할당(승인된 구매 심의 중 미집행)</div>' + sortBtns + '</div>'
       + '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th class="w-1"></th><th>과제</th><th class="w-1">종료</th>'
       + BUD.POOLS.map(function (c) { return '<th class="text-end">' + esc(c.label) + '</th>'; }).join('') + '<th class="text-end">합계</th></tr></thead><tbody>'
       + rows.map(function (x) {
@@ -1088,20 +1154,47 @@
   }
 
   /* ---------- 구매기록 내보내기: 연구비 엑셀 '구매기록' 시트와 같은 열 ---------- */
-  function exportPurchaseLog() {
-    var list = state.requests.filter(function (r) { return r.status === 'done' && r.kind !== 'meeting'; })
-      .sort(function (a, b) { return String(a.processedAt || a.createdAt).localeCompare(String(b.processedAt || b.createdAt)); });
-    if (!list.length) { toast('처리된 구매 요청이 없습니다.', true); return; }
-    var head = ['날짜', '이름', '구매품목', '구매상세정보', '가격 (VAT포함)', '할당과제', '세목', '구매주기', '팀', '컨펌', '관련 과제', '처리일', '처리자'];
-    var rows = list.map(function (r) {
-      var p = projectById(r.projectId);
-      var d = localDate(r.createdAt).replace(/-/g, '').slice(2);
-      return [d, r.requesterName, r.item, r.note || (r.item + ', ' + (r.qty || 1) + 'EA'), Number(r.amount) || 0, p ? (p.alias || p.name) : '', catLabel(poolOf(r.category)), (r.meta && r.meta.cycle) || '', (r.meta && r.meta.team) || '', (r.meta && r.meta.confirmedBy) || '', relatedName(r), localDate(r.processedAt), r.processedBy || ''];
+  /* ---------- 구매 이력 탭: 구매 확정 때 자동으로 쌓이는 시트 (삭제는 관리자 삭제 버튼으로만) ---------- */
+  function renderHistoryTab() {
+    var admin = isAdminActive();
+    var q = state.historyQ.trim().toLowerCase();
+    var list = state.history.filter(function (h) {
+      return !q || [h.item, h.detail, h.requesterName, h.projectName, h.team, h.confirmer].join(' ').toLowerCase().indexOf(q) >= 0;
     });
+    var total = list.reduce(function (s, h) { return s + (Number(h.amount) || 0); }, 0);
+    var body = '<div class="card-body py-2 border-bottom d-flex flex-wrap gap-2 align-items-center">'
+      + '<div class="small text-secondary me-auto"><i class="ti ti-info-circle me-1"></i>구매자가 <strong>구매 확정</strong>을 누르면 자동으로 한 줄씩 저장됩니다. 요청을 지워도 남고, 관리자가 삭제 버튼을 눌러야만 지워집니다.</div>'
+      + '<input type="search" class="form-control form-control-sm w-auto" data-role="history-q" placeholder="품명·이름·과제 검색" value="' + esc(state.historyQ) + '">'
+      + '<button type="button" class="btn btn-sm" data-action="export-history"><i class="ti ti-file-spreadsheet me-1"></i>엑셀로 받기</button></div>';
+    if (!list.length) return { body: body + '<div class="card-body">' + empty('history-off', state.history.length ? '검색 결과가 없습니다' : '아직 구매 확정된 이력이 없습니다', state.history.length ? '' : '승인된 구매 요청에서 보고서를 쓰고 구매 확정을 누르면 여기에 쌓입니다.') + '</div>' };
+    body += '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th class="w-1">확정일</th><th class="w-1">이름</th><th>구매품목</th><th class="text-end">가격</th><th>할당과제</th><th>팀 · 컨펌</th>' + (admin ? '<th class="w-1"></th>' : '') + '</tr></thead><tbody>'
+      + list.map(function (h) {
+        return '<tr><td class="text-nowrap text-secondary">' + fmtDate(h.confirmedAt) + '</td><td class="text-nowrap">' + esc(h.requesterName) + '</td>'
+          + '<td><div class="fw-medium">' + esc(h.item) + (h.link ? ' <a href="' + esc(h.link) + '" target="_blank" rel="noopener" class="text-secondary" title="구매처"><i class="ti ti-external-link"></i></a>' : '') + '</div>'
+          + '<div class="small text-secondary">' + esc(catLabel(poolOf(h.category))) + (h.cycle ? ' · ' + esc(h.cycle) : '') + (h.history ? ' · ' + (h.history === 'repeat' ? '재구매' : '신규') : '') + (h.detail ? ' · ' + esc(h.detail) : '') + '</div></td>'
+          + '<td class="text-end tnum text-nowrap">' + won(h.amount) + '</td><td>' + esc(h.projectName || '-') + '</td>'
+          + '<td class="small text-nowrap">' + esc(h.team || '-') + (h.confirmer ? '<div class="text-secondary">' + esc(h.confirmer) + ' 컨펌</div>' : '') + '</td>'
+          + (admin ? '<td><button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="delete-history" data-history="' + esc(h.id) + '" title="이력 삭제"><i class="ti ti-trash"></i></button></td>' : '') + '</tr>';
+      }).join('')
+      + '<tr class="fw-bold"><td colspan="3">합계 ' + list.length + '건</td><td class="text-end tnum">' + won(total) + '</td><td colspan="' + (admin ? 3 : 2) + '"></td></tr></tbody></table></div>';
+    return { body: body };
+  }
+
+  /* 구매 이력 시트(구매 확정 건) → 연구비 엑셀 '구매기록' 시트 열 순서 + 추가 정보 */
+  var HISTORY_HEAD = ['날짜', '이름', '구매품목', '구매상세정보', '가격 (VAT포함)', '할당과제', '세목', '구매주기', '신규/재구매', '팀', '컨펌', '구매처 링크', '승인일', '구매 확정일'];
+  function historyRow(h) {
+    return [localDate(h.requestedAt || h.confirmedAt).replace(/-/g, '').slice(2), h.requesterName, h.item, h.detail || (h.item + ', ' + (h.qty || 1) + 'EA'), Number(h.amount) || 0,
+      h.projectName, catLabel(poolOf(h.category)), h.cycle, h.history === 'repeat' ? '재구매' : h.history === 'new' ? '신규' : '', h.team, h.confirmer, h.link, localDate(h.approvedAt), localDate(h.confirmedAt)];
+  }
+  function exportPurchaseLog() {
+    var list = state.history.slice().sort(function (a, b) { return String(a.confirmedAt).localeCompare(String(b.confirmedAt)); });
+    if (!list.length) { toast('구매 확정된 이력이 없습니다.', true); return; }
+    var head = HISTORY_HEAD;
+    var rows = list.map(historyRow);
     var name = 'DSIL_구매기록_' + localDate(new Date().toISOString()).replace(/-/g, '').slice(2);
     if (window.XLSX) {
       var ws = window.XLSX.utils.aoa_to_sheet([head].concat(rows));
-      ws['!cols'] = [{ wch: 8 }, { wch: 8 }, { wch: 24 }, { wch: 40 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 8 }, { wch: 12 }, { wch: 14 }, { wch: 11 }, { wch: 8 }];
+      ws['!cols'] = [{ wch: 8 }, { wch: 8 }, { wch: 24 }, { wch: 40 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 8 }, { wch: 12 }, { wch: 30 }, { wch: 11 }, { wch: 11 }];
       var wb = window.XLSX.utils.book_new(); window.XLSX.utils.book_append_sheet(wb, ws, '구매기록');
       window.XLSX.writeFile(wb, name + '.xlsx');
     } else {
@@ -1138,13 +1231,42 @@
           + amountCell(r)
           + '<td><select class="form-select form-select-sm" data-role="assign-project">' + projectOptions(r.amount, pre.cat, pre.projectId) + '</select>' + cardUsersHint(pre.projectId) + '</td>'
           + '<td><select class="form-select form-select-sm" data-role="assign-cat">' + catOptions(pre.cat) + '</select></td>'
-          + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-primary" data-action="assign">처리</button> '
+          + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-primary" data-action="assign">승인</button> '
           + '<button type="button" class="btn btn-sm btn-outline-danger" data-action="reject">반려</button> '
           + '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="edit-request" title="수정"><i class="ti ti-edit"></i></button></td>'
           + '</tr>';
       });
       body += '</tbody></table></div>';
     }
+
+    /* 구매자 반려 신청: 승인하면 요청 반려(가처리 해제), 거절하면 계속 진행 */
+    var cancelReqs = state.requests.filter(function (r) { return BUD.purchaseState(r) === 'cancelRequested'; });
+    if (cancelReqs.length) {
+      body += '<div class="card-body pb-2 border-top"><h3 class="card-title mb-0"><i class="ti ti-arrow-back-up me-1 text-orange"></i>반려 신청 <span class="badge bg-orange-lt ms-1">' + cancelReqs.length + '</span></h3></div>'
+        + '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th class="w-1">신청 / 요청자</th><th>품명</th><th class="text-end">금액</th><th>반려 사유</th><th class="w-1"></th></tr></thead><tbody>'
+        + cancelReqs.map(function (r) {
+          var cr = r.meta.cancelRequest, p = projectById(r.projectId);
+          return '<tr data-id="' + esc(r.id) + '"><td class="text-nowrap"><div>' + fmtDate(cr.at) + '</div><div class="small text-secondary">' + esc(r.requesterName) + '</div></td>'
+            + '<td><div class="fw-medium">' + esc(r.item) + '</div><div class="small text-secondary">' + esc(p ? (p.alias || p.name) : '') + ' · ' + esc(catLabel(poolOf(r.category))) + '</div></td>'
+            + '<td class="text-end tnum text-nowrap">' + won(r.amount) + '</td><td class="small">' + esc(cr.reason) + '</td>'
+            + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-danger" data-action="resolve-cancel" data-approve="1">반려 처리</button> <button type="button" class="btn btn-sm" data-action="resolve-cancel" data-approve="0">거절</button></td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+
+    /* 승인됐지만 구매 확정 전(가처리): 관리자가 승인 취소 가능 */
+    var provisional = state.requests.filter(function (r) { return r.kind !== 'meeting' && BUD.purchaseState(r) === 'provisional'; });
+    body += '<div class="card-body pb-2 border-top"><h3 class="card-title mb-0"><i class="ti ti-hourglass me-1 text-primary"></i>구매 확정 대기 (가처리) <span class="badge bg-blue-lt ms-1">' + provisional.length + '</span></h3>'
+      + '<div class="small text-secondary mt-1">승인한 건은 구매자가 보고서를 쓰고 구매 확정을 누를 때까지 예산에 가처리됩니다. 확정 전에는 승인을 취소할 수 있습니다.</div></div>';
+    if (!provisional.length) body += '<div class="card-body pt-0"><div class="text-secondary small">구매 확정을 기다리는 건이 없습니다.</div></div>';
+    else body += '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th class="w-1">승인 / 요청자</th><th>품명</th><th class="text-end">금액</th><th>과제</th><th class="w-1">보고서</th><th class="w-1"></th></tr></thead><tbody>'
+      + provisional.map(function (r) {
+        var p = projectById(r.projectId);
+        return '<tr data-id="' + esc(r.id) + '"><td class="text-nowrap"><div>' + fmtDate(r.processedAt) + '</div><div class="small text-secondary">' + esc(r.requesterName) + '</div></td>'
+          + '<td class="fw-medium">' + esc(r.item) + '</td><td class="text-end tnum text-nowrap">' + won(r.amount) + '</td>'
+          + '<td>' + esc(p ? (p.alias || p.name) : '-') + '<div class="small text-secondary">' + esc(catLabel(poolOf(r.category))) + '</div></td>'
+          + '<td>' + reportBadge(r) + '</td>'
+          + '<td class="text-end"><button type="button" class="btn btn-sm btn-outline-secondary" data-action="revoke-approval"><i class="ti ti-arrow-back-up me-1"></i>승인 취소</button></td></tr>';
+      }).join('') + '</tbody></table></div>';
 
     body += '<div class="card-body pb-2 border-top"><h3 class="card-title mb-0"><i class="ti ti-shield-check me-1 text-primary"></i>구매 심의 대기 <span class="badge bg-yellow-lt ms-1">' + rvPending.length + '</span></h3></div>';
     if (!rvPending.length) {
@@ -1487,6 +1609,7 @@
       + '<div class="col-6"><label class="form-label required">단가 (원)</label><input type="number" class="form-control" name="unitPrice" min="0" step="1" required value="' + esc(r.unitPrice) + '"></div>'
       + '<div class="col-12"><label class="form-label">사용 용도 <span class="form-label-description">어떤 용도로 쓰는지 상세히</span></label><textarea class="form-control" name="note" rows="3">' + esc(r.note) + '</textarea></div>'
       + (r.kind !== 'meeting' ? '<div class="col-sm-6"><label class="form-label">구매 주기</label><select class="form-select" name="cycle">' + cycleOptions((r.meta && r.meta.cycle) || '') + '</select></div>'
+        + '<div class="col-sm-6"><label class="form-label">구매 이력</label><select class="form-select" name="history">' + [['', '선택…'], ['new', '신규 구매'], ['repeat', '재구매']].map(function (o) { return '<option value="' + o[0] + '"' + (((r.meta && r.meta.history) || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select></div>'
         + '<div class="col-sm-6"><label class="form-label">팀</label><select class="form-select" name="team">' + teamOptions((r.meta && r.meta.team) || '') + '</select></div>'
         + '<div class="col-sm-6"><label class="form-label">컨펌한 사람</label><input type="text" class="form-control" name="confirmedBy" value="' + esc((r.meta && r.meta.confirmedBy) || '') + '"></div>'
         + '<div class="col-sm-6"><label class="form-label">가장 관련 있는 과제</label><select class="form-select" name="relatedProjectId">' + relatedOptions(r.meta && r.meta.relatedUnknown ? 'unknown' : ((r.meta && r.meta.suggestedProjectId) || '')) + '</select></div>' : '')
@@ -1498,7 +1621,7 @@
       var unit = Math.max(0, Math.round(Number(v.unitPrice) || 0));
       var patch = { item: v.item.trim(), category: normCat(v.category), link: v.link.trim(), qty: qty, unitPrice: unit, amount: qty * unit, note: v.note.trim() };
       if (v.cycle !== undefined) {
-        patch.meta = Object.assign({}, r.meta || {}, { cycle: v.cycle, team: v.team, confirmedBy: (v.confirmedBy || '').trim(), confirmRoute: needsProfessor(qty * unit) ? 'professor' : 'team',
+        patch.meta = Object.assign({}, r.meta || {}, { cycle: v.cycle, history: v.history || '', team: v.team, confirmedBy: (v.confirmedBy || '').trim(), confirmRoute: needsProfessor(qty * unit) ? 'professor' : 'team',
           suggestedProjectId: v.relatedProjectId === 'unknown' ? '' : v.relatedProjectId, relatedUnknown: v.relatedProjectId === 'unknown' });
       }
       if (admin) patch.adminNote = v.adminNote.trim();
@@ -1530,6 +1653,7 @@
     Array.prototype.forEach.call(form.elements, function (el) {
       if (!el.name) return;
       if (el.type === 'checkbox') out[el.name] = el.checked;
+      else if (el.type === 'radio') { if (el.checked) out[el.name] = el.value; else if (!(el.name in out)) out[el.name] = ''; }   /* 고른 것만 (ui.js readForm 과 같게) */
       else out[el.name] = el.value;
     });
     return out;
@@ -1579,6 +1703,8 @@
       var unit = Math.max(0, Math.round(Number(r.unitPrice) || 0));
       if (!markMissing(form, [
         { name: 'item', label: '품명', ok: !!r.item.trim() },
+        { name: 'link', label: '구매처 링크(https://…)', ok: /^https?:\/\/\S+\.\S+/.test(r.link.trim()) },
+        { name: 'history', label: '구매 이력(신규/재구매)', ok: r.history === 'new' || r.history === 'repeat' },
         { name: 'unitPrice', label: '단가', ok: String(r.unitPrice).trim() !== '' && Number(r.unitPrice) >= 0 },
         { name: 'note', label: '사용 용도(' + USAGE_MIN + '자 이상으로 상세히)', ok: r.note.trim().length >= USAGE_MIN },
         { name: 'cycle', label: '구매 주기', ok: !!r.cycle },
@@ -1586,7 +1712,9 @@
         { name: 'confirmedBy', label: '컨펌한 사람', ok: !!r.confirmedBy.trim() },
         { name: 'relatedProjectId', label: '가장 관련 있는 과제', ok: !!r.relatedProjectId }
       ])) return;
-      var meta = { cycle: r.cycle, team: r.team, confirmedBy: r.confirmedBy.trim(), confirmRoute: needsProfessor(qty * unit) ? 'professor' : 'team',
+      var prevBuys = previousPurchases(r.item);
+      var meta = { cycle: r.cycle, history: r.history, prevPurchase: prevBuys[0] ? { at: prevBuys[0].at, by: prevBuys[0].by, amount: prevBuys[0].amount } : null,
+        team: r.team, confirmedBy: r.confirmedBy.trim(), confirmRoute: needsProfessor(qty * unit) ? 'professor' : 'team',
         suggestedProjectId: r.relatedProjectId === 'unknown' ? '' : r.relatedProjectId, relatedUnknown: r.relatedProjectId === 'unknown' };
       store.createRequest({ item: r.item.trim(), category: normCat(r.category), link: r.link.trim(), qty: qty, unitPrice: unit, amount: qty * unit, note: r.note.trim(), reviewId: r.reviewId || null, meta: meta })
         .then(function () { toast('요청을 제출했습니다. 관리자 처리 후 상태가 바뀝니다.'); return refresh(); })
@@ -1637,6 +1765,14 @@
       rf.amountView.value = won(qty * unit);
       var tier = $('#request-tier'); if (tier) tier.innerHTML = qty * unit > 0 ? '적용 절차 ' + tierBadge(qty * unit) : '';
       var guide = $('#confirm-guide'); if (guide) guide.innerHTML = confirmGuideHtml(qty * unit);
+      if (e.target.name === 'item') {
+        var hh = $('#history-hint'); if (hh) hh.innerHTML = historyHintHtml(rf.item.value);
+        /* 이력이 있으면 재구매로 미리 표시 (사용자가 직접 고른 뒤에는 건드리지 않음) */
+        if (!rf.getAttribute('data-history-touched')) {
+          var found = previousPurchases(rf.item.value).length > 0;
+          $all('input[name="history"]', rf).forEach(function (x) { x.checked = found ? x.value === 'repeat' : false; });
+        }
+      }
       return;
     }
     var vf = e.target.closest('#review-form');
@@ -1654,6 +1790,8 @@
     var el = e.target;
     var action = el.getAttribute('data-action');
     var role = el.getAttribute('data-role');
+    if (el.name === 'history' && el.form && el.form.id === 'request-form') el.form.setAttribute('data-history-touched', '1');
+    if (role === 'history-q') { state.historyQ = el.value; render(); return; }
     /* 팀을 고르면 그 팀 중간관리자 이름을 채움 (비어 있거나 다른 팀 중간관리자로 채워져 있을 때만) */
     if (el.name === 'team' && el.form && el.form.elements.confirmedBy) {
       var cb = el.form.elements.confirmedBy, mgrs = PR.teams.map(function (t) { return t.manager; }).filter(Boolean);
@@ -1786,15 +1924,16 @@
         var over = (Number(req.amount) || 0) > remain;
         var urg = BUD.urgency(proj);
         if (!over && urg.check) over = null;   /* 집행 전 확인 과제: 아래에서 따로 확인 */
-        var ask = over === null
-          ? confirmDlg({ title: '집행 전 확인 과제', message: (proj.alias || proj.name) + ' 은(는) 행정 현황에 "' + ((BUD.base(proj) || {}).status || '집행 전 확인') + '"로 표시된 과제입니다. 이 과제로 배정할까요?', okLabel: '배정' })
-          : over
-          ? confirmDlg({ title: '비목 예산 초과', message: '이 과제의 ' + catLabel(cat) + ' 잔액은 ' + won(remain) + '이고 요청 금액은 ' + won(req.amount) + '입니다. 그래도 배정할까요?', okLabel: '초과 배정', danger: true })
-          : Promise.resolve(true);
+        /* 승인은 항상 팝업으로 한 번 더 확인 (예산 초과·집행 전 확인 과제면 경고를 함께) */
+        var summaryLine = '「' + req.item + '」 ' + won(req.amount) + ' → ' + (proj.alias || proj.name) + ' · ' + catLabel(cat) + ' (잔액 ' + won(remain) + ')';
+        var warn = over === null ? ' 이 과제는 행정 현황에 "' + ((BUD.base(proj) || {}).status || '집행 전 확인') + '"로 표시되어 있습니다.'
+          : over ? ' 요청 금액이 이 세목 잔액보다 많습니다.' : '';
+        var ask = confirmDlg({ title: over ? '예산 초과 · 승인하시겠습니까?' : '승인하시겠습니까?', message: summaryLine + '.' + warn + ' 승인하면 예산에 가처리되고, 구매자가 구매 확정을 하면 차감이 확정됩니다.',
+          okLabel: over ? '초과 승인' : '승인', danger: !!over });
         ask.then(function (ok) {
           if (!ok) return;
           return store.updateRequest(id, { status: 'done', projectId: pid, category: cat, processedAt: new Date().toISOString(), processedBy: state.session.user.name, adminNote: '' })
-            .then(function () { toast('처리 완료: ' + proj.name + ' · ' + catLabel(cat)); touchUnlock(); return refresh(); });
+            .then(function () { toast('승인했습니다: ' + (proj.alias || proj.name) + ' · ' + catLabel(cat) + ' (가처리)'); touchUnlock(); return refresh(); });
         }).catch(handleError);
         break;
       }
@@ -1809,6 +1948,44 @@
         store.updateRequest(id, { status: 'pending', projectId: null, processedAt: null, processedBy: null, adminNote: '' })
           .then(function () { toast('미처리로 되돌렸습니다.'); touchUnlock(); return refresh(); }).catch(handleError);
         break;
+      case 'revoke-approval': {
+        /* 관리자 승인 취소: 구매 확정 전까지만. 가처리가 풀리고 미처리로 돌아감 */
+        var rq = requestById(id);
+        if (rq && BUD.isConfirmed(rq)) { toast('구매 확정된 요청은 승인을 취소할 수 없습니다.', true); return; }
+        confirmDlg({ title: '승인 취소', message: '「' + (rq ? rq.item : '') + '」 승인을 취소할까요? 예산 가처리가 풀리고 미처리로 돌아갑니다. 작성 중인 보고서는 남습니다.', okLabel: '승인 취소', danger: true }).then(function (ok) {
+          if (!ok) return;
+          var meta = Object.assign({}, rq.meta || {}); delete meta.cancelRequest;
+          return store.updateRequest(id, { status: 'pending', projectId: null, processedAt: null, processedBy: null, adminNote: '', meta: meta })
+            .then(function () { toast('승인을 취소했습니다. 미처리로 돌아갔습니다.'); touchUnlock(); return refresh(); });
+        }).catch(handleError);
+        break;
+      }
+      case 'cancel-request':
+        promptDlg({ title: '반려 신청', message: '구매를 취소하려는 사유를 적어 주세요. 관리자가 확인하면 요청이 반려되고 예산 가처리가 풀립니다.', input: 'textarea', placeholder: '예: 다른 과제 물품으로 대체, 구매처 품절', okLabel: '반려 신청', danger: true }).then(function (reason) {
+          if (reason === null) return;
+          if (!reason.trim()) { toast('반려 신청 사유를 적어 주세요.', true); return; }
+          return store.requestPurchaseCancel(id, reason).then(function () { toast('반려 신청을 넣었습니다. 관리자 처리를 기다려 주세요.'); return refresh(); });
+        }).catch(handleError);
+        break;
+      case 'resolve-cancel': {
+        var approve = btn.getAttribute('data-approve') === '1';
+        promptDlg({ title: approve ? '반려 신청 승인' : '반려 신청 거절', message: approve ? '요청을 반려하고 예산 가처리를 풉니다. 메모가 있으면 적어 주세요(선택).' : '거절 사유를 적어 주세요. 구매자에게 표시됩니다.', input: 'textarea', okLabel: approve ? '반려 처리' : '거절', danger: approve }).then(function (note) {
+          if (note === null) return;
+          return store.resolvePurchaseCancel(id, approve, note).then(function () { toast(approve ? '반려 처리했습니다.' : '반려 신청을 거절했습니다.'); touchUnlock(); return refresh(); });
+        }).catch(handleError);
+        break;
+      }
+      case 'delete-history': {
+        var hid = btn.getAttribute('data-history');
+        var h = state.history.filter(function (x) { return x.id === hid; })[0];
+        confirmDlg({ title: '구매 이력 삭제', message: '「' + (h ? h.item : '') + '」 구매 이력을 삭제할까요? 구매 요청과는 별개로 이 시트에서만 지워지며 되돌릴 수 없습니다.', okLabel: '삭제', danger: true }).then(function (ok) {
+          if (!ok) return;
+          return store.deletePurchaseHistory(hid).then(function () { toast('구매 이력을 삭제했습니다.'); touchUnlock(); return refresh(); });
+        }).catch(handleError);
+        break;
+      }
+      case 'export-history':
+        exportPurchaseLog(); break;
       case 'edit-request':
         editRequest(id).catch(handleError); break;
       case 'delete-request': {
