@@ -316,8 +316,10 @@ drop policy if exists "projects: admin write"  on public.projects;
 create policy "projects: admin read"  on public.projects for select to authenticated using (public.is_admin());
 create policy "projects: admin write" on public.projects for all    to authenticated using (public.is_admin()) with check (public.is_admin());
 
--- 과제 담당자(owners): 관리자가 아니어도 자기 담당 과제의 예산은 볼 수 있습니다.
+-- 과제 담당자(owners): 예전에는 담당 과제 예산을 볼 수 있었으나, 이제 예산은 관리자만 봅니다 (열은 보존).
 alter table public.projects add column if not exists owners jsonb not null default '[]'::jsonb;
+-- 행정 연구비 현황 기준 (기준일·종료 구분·통합 잔액 등). budgets 와 함께 관리자만 읽습니다.
+alter table public.projects add column if not exists budget_base jsonb not null default '{}'::jsonb;
 
 create or replace function public.is_project_owner(p_owners jsonb)
 returns boolean language sql stable security definer set search_path = public as $$
@@ -332,7 +334,7 @@ drop view if exists public.projects_public;
 create view public.projects_public as
 select id, code, name, start_date, end_date, manager, active, created_at, alias, participants, owners,
        account_manager, card_users,
-       case when public.is_admin() or public.is_project_owner(owners) then budgets else '{}'::jsonb end as budgets
+       case when public.is_admin() then budgets else '{}'::jsonb end as budgets
 from public.projects;
 alter view public.projects_public set (security_invoker = false);
 grant select on public.projects_public to authenticated;
@@ -1052,3 +1054,123 @@ create policy "security: admin read" on public.security_events for select to aut
 
 -- (선택) 특정 도메인만 가입 허용하려면 Supabase Dashboard > Authentication > Settings 에서
 -- "Restrict sign-ups to email domains" 에 kaist.ac.kr 을 추가하세요.
+
+-- =====================================================================
+-- 구매 확정 · 반려 신청 · 구매 이력 시트
+--   관리자 승인(status done) 후 구매 확정 전 = 가처리, requests.meta.purchase.confirmedAt 이 있으면 확정.
+--   구매 이력(purchase_history)은 확정 때 자동으로 한 줄씩 쌓이고, 관리자가 삭제해야만 지워집니다.
+-- =====================================================================
+create table if not exists public.purchase_history (
+  id              uuid primary key default gen_random_uuid(),
+  request_id      uuid,
+  confirmed_at    timestamptz not null default now(),
+  confirmed_by    text not null default '',
+  requested_at    timestamptz,
+  requester_name  text not null default '',
+  item            text not null default '',
+  detail          text not null default '',
+  link            text not null default '',
+  qty             numeric not null default 1,
+  unit_price      bigint not null default 0,
+  amount          bigint not null default 0,
+  category        text not null default '',
+  project_id      uuid,
+  project_name    text not null default '',
+  project_code    text not null default '',
+  team            text not null default '',
+  confirmer       text not null default '',
+  cycle           text not null default '',
+  history         text not null default '',
+  approved_at     timestamptz,
+  approved_by     text not null default ''
+);
+create index if not exists purchase_history_confirmed_idx on public.purchase_history (confirmed_at desc);
+
+-- 구매자 본인(또는 관리자)이 보고서를 저장하며 구매 확정 → 이력 시트에 추가
+create or replace function public.confirm_purchase(p_id uuid, p_report jsonb)
+returns setof public.purchase_history language plpgsql security definer set search_path = public as $$
+declare v_r public.requests%rowtype; v_me public.profiles%rowtype; v_p public.projects%rowtype; v_rep jsonb; v_hid uuid;
+begin
+  select * into v_me from public.profiles where id = auth.uid();
+  if not found or v_me.status <> 'active' then raise exception '로그인이 필요합니다.'; end if;
+  select * into v_r from public.requests where id = p_id for update;
+  if not found then raise exception '요청을 찾을 수 없습니다.'; end if;
+  if v_r.kind = 'meeting' then raise exception '회의비는 구매 확정 대상이 아닙니다.'; end if;
+  if v_r.requester_id <> auth.uid() and not v_me.is_admin then raise exception '요청자 본인만 구매를 확정할 수 있습니다.'; end if;
+  if v_r.status <> 'done' then raise exception '관리자 승인 후에 구매를 확정할 수 있습니다.'; end if;
+  if v_r.meta->'purchase'->>'confirmedAt' is not null then raise exception '이미 구매 확정된 요청입니다.'; end if;
+  if v_r.meta->'cancelRequest'->>'status' = 'pending' then raise exception '반려 신청 중인 요청입니다. 관리자 처리 후 다시 시도하세요.'; end if;
+  v_rep := coalesce(v_r.report, '{}'::jsonb) || coalesce(p_report, '{}'::jsonb)
+           || jsonb_build_object('updatedAt', now(), 'updatedBy', v_me.name);
+  if not (v_rep ? 'createdAt') then v_rep := v_rep || jsonb_build_object('createdAt', now()); end if;
+  if not (v_rep ? 'status') then v_rep := v_rep || '{"status":"draft"}'::jsonb; end if;
+  update public.requests set report = v_rep,
+    meta = coalesce(meta, '{}'::jsonb) || jsonb_build_object('purchase', jsonb_build_object('confirmedAt', now(), 'confirmedBy', v_me.name))
+  where id = p_id;
+  select * into v_p from public.projects where id = v_r.project_id;
+  insert into public.purchase_history (request_id, confirmed_by, requested_at, requester_name, item, detail, link, qty, unit_price, amount, category,
+    project_id, project_name, project_code, team, confirmer, cycle, history, approved_at, approved_by)
+  values (v_r.id, coalesce(v_me.name, ''), v_r.created_at, coalesce(v_r.requester_name, ''), v_r.item, coalesce(v_r.note, ''), coalesce(v_r.link, ''), v_r.qty, v_r.unit_price, v_r.amount, coalesce(v_r.category, ''),
+    v_r.project_id, coalesce(nullif(v_p.alias, ''), v_p.name, ''), coalesce(v_p.code, ''), coalesce(v_r.meta->>'team', ''), coalesce(v_r.meta->>'confirmedBy', ''),
+    coalesce(v_r.meta->>'cycle', ''), coalesce(v_r.meta->>'history', ''), v_r.processed_at, coalesce(v_r.processed_by_name, ''))
+  returning id into v_hid;
+  return query select * from public.purchase_history where id = v_hid;
+end;
+$$;
+
+-- 구매자 반려 신청 (승인 후 확정 전)
+create or replace function public.request_purchase_cancel(p_id uuid, p_reason text)
+returns public.requests language plpgsql security definer set search_path = public as $$
+declare v_r public.requests%rowtype; v_name text;
+begin
+  select * into v_r from public.requests where id = p_id for update;
+  if not found then raise exception '요청을 찾을 수 없습니다.'; end if;
+  if v_r.requester_id <> auth.uid() then raise exception '본인 요청만 반려 신청할 수 있습니다.'; end if;
+  if v_r.status <> 'done' then raise exception '관리자가 승인한 요청만 반려 신청할 수 있습니다. 미처리 요청은 직접 취소하세요.'; end if;
+  if v_r.meta->'purchase'->>'confirmedAt' is not null then raise exception '구매 확정된 요청은 반려 신청할 수 없습니다.'; end if;
+  if coalesce(trim(p_reason), '') = '' then raise exception '반려 신청 사유를 적어 주세요.'; end if;
+  select name into v_name from public.profiles where id = auth.uid();
+  update public.requests set meta = coalesce(meta, '{}'::jsonb) || jsonb_build_object('cancelRequest',
+    jsonb_build_object('status', 'pending', 'at', now(), 'by', coalesce(v_name, ''), 'reason', trim(p_reason)))
+  where id = p_id returning * into v_r;
+  return v_r;
+end;
+$$;
+
+-- 관리자: 반려 신청 승인(요청 반려, 가처리 해제) / 거절
+create or replace function public.resolve_purchase_cancel(p_id uuid, p_approve boolean, p_note text)
+returns public.requests language plpgsql security definer set search_path = public as $$
+declare v_r public.requests%rowtype; v_name text; v_cr jsonb;
+begin
+  if not public.is_admin() then raise exception '관리자만 처리할 수 있습니다.'; end if;
+  select * into v_r from public.requests where id = p_id for update;
+  if not found then raise exception '요청을 찾을 수 없습니다.'; end if;
+  v_cr := v_r.meta->'cancelRequest';
+  if v_cr is null or v_cr->>'status' <> 'pending' then raise exception '처리할 반려 신청이 없습니다.'; end if;
+  select name into v_name from public.profiles where id = auth.uid();
+  v_cr := v_cr || jsonb_build_object('status', case when p_approve then 'approved' else 'denied' end, 'resolvedAt', now(), 'resolvedBy', coalesce(v_name, ''), 'resolvedNote', coalesce(trim(p_note), ''));
+  if p_approve then
+    update public.requests set status = 'rejected', project_id = null, processed_at = now(), processed_by_name = coalesce(v_name, ''),
+      admin_note = '구매자 반려 신청 승인: ' || (v_cr->>'reason') || case when coalesce(trim(p_note), '') <> '' then ' (' || trim(p_note) || ')' else '' end,
+      meta = coalesce(meta, '{}'::jsonb) || jsonb_build_object('cancelRequest', v_cr)
+    where id = p_id returning * into v_r;
+  else
+    update public.requests set meta = coalesce(meta, '{}'::jsonb) || jsonb_build_object('cancelRequest', v_cr) where id = p_id returning * into v_r;
+  end if;
+  return v_r;
+end;
+$$;
+
+revoke all on function public.confirm_purchase(uuid, jsonb) from public;
+revoke all on function public.request_purchase_cancel(uuid, text) from public;
+revoke all on function public.resolve_purchase_cancel(uuid, boolean, text) from public;
+grant execute on function public.confirm_purchase(uuid, jsonb) to authenticated;
+grant execute on function public.request_purchase_cancel(uuid, text) to authenticated;
+grant execute on function public.resolve_purchase_cancel(uuid, boolean, text) to authenticated;
+
+-- 이력: 승인된 구성원은 모두 열람, 추가는 confirm_purchase 로만, 삭제는 관리자만
+alter table public.purchase_history enable row level security;
+drop policy if exists "purchase_history: read active" on public.purchase_history;
+drop policy if exists "purchase_history: admin delete" on public.purchase_history;
+create policy "purchase_history: read active"  on public.purchase_history for select to authenticated using (public.is_active());
+create policy "purchase_history: admin delete" on public.purchase_history for delete to authenticated using (public.is_admin());

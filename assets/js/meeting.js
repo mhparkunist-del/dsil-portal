@@ -88,21 +88,10 @@
   }
   function logPlain(type, detail) { return store.addMeetingLog({ type: type, detail: detail || '' }).catch(function (e) { console.error(e); }); }
 
-  /* 과제·비목별 잔액 = 예산 − 실집행 − 가할당 (구매 요청 페이지와 같은 규칙) */
+  /* 과제 잔액 (구매 요청 페이지와 같은 budget-core 계산). 회의비는 연구활동비 세목에서 차감 */
+  var BUD = window.DSILBudget.create(CFG);
   function remainOf(p, cat) {
-    var budget = Number(p.budgets && p.budgets[cat]) || 0;
-    var actual = 0;
-    state.requests.forEach(function (r) { if (r.status === 'done' && r.projectId === p.id && normCat(r.category) === cat) actual += Number(r.amount) || 0; });
-    var prov = 0;
-    if (state.reviewsFull) {
-      state.reviews.forEach(function (rv) {
-        if (rv.status !== 'approved' || rv.projectId !== p.id || normCat(rv.category) !== cat) return;
-        var approved = Number(rv.approvedAmount !== null && rv.approvedAmount !== undefined ? rv.approvedAmount : rv.amount) || 0;
-        var used = 0; state.requests.forEach(function (r) { if (r.status === 'done' && r.reviewId === rv.id) used += Number(r.amount) || 0; });
-        prov += Math.max(0, approved - used);
-      });
-    }
-    return budget - actual - prov;
+    return BUD.remainFor(p, cat, { requests: state.requests, reviews: state.reviewsFull ? state.reviews : [], allocations: [] });
   }
   function projectOptions(amount, cat, selectedId) {
     return '<option value="">과제 선택…</option>' + state.projects.filter(function (p) { return p.active !== false; }).map(function (p) {
@@ -572,7 +561,7 @@
     if (amount / names.length > MCFG.perPersonMax) { toast('1인당 ' + won(amount / names.length) + '으로 한도 ' + won(MCFG.perPersonMax) + '을 넘습니다. ' + need + '명 이상 배정하세요 (자동 추가).', true); return; }
     var cat = normCat(DEFAULT_CAT);
     var remain = remainOf(p, cat);
-    var warn = (isAdminActive() && amount > remain) ? confirmDlg({ title: '회의비 예산 초과', message: (p.alias || p.name) + ' 의 회의비 잔액은 ' + won(remain) + '입니다. 그래도 처리할까요?', okLabel: '처리', danger: true }) : Promise.resolve(true);
+    var warn = (isAdminActive() && amount > remain) ? confirmDlg({ title: '회의비 예산 초과', message: (p.alias || p.name) + ' 의 연구활동비(회의비 포함) 잔액은 ' + won(remain) + '입니다. 그래도 처리할까요?', okLabel: '처리', danger: true }) : Promise.resolve(true);
     warn.then(function (go) {
       if (!go) return;
       var now = new Date().toISOString();

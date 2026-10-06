@@ -14,7 +14,7 @@ KAIST DSIL(Device-to-System Integration Lab) 내부 업무 포털의 구조, 설
 
 | 모듈 | 경로 | 해결하려는 문제 |
 |---|---|---|
-| 구매 요청 | `budget/` | 구매 건이 관리자에게 모이고, 관리자가 과제·비목을 배정하면 예산이 자동으로 차감됩니다. 신청자는 처리 여부를 직접 확인합니다 |
+| 구매 요청 | `budget/` | 팀 중간관리자(500만원 초과는 교수님) 컨펌을 받은 구매 건이 관리자에게 모이고, 관리자가 관련 과제·추천 과제를 보고 배정하면 예산이 자동으로 차감됩니다. 과제 예산 대시보드(관리자 전용)는 2주마다 받는 행정 연구비 현황 엑셀을 기준으로 합니다 |
 | 구매 보고서 | `report/` | 정산용 한글 양식(영수증·거래내역·기타 정보 표·검수 사진)을 입력만으로 만들고, 포닥 검수자가 승인·서명합니다 |
 | 회의비 처리 | `meeting/` | 참여과제 시트 기준으로 참석자와 1인당 한도를 자동 확인하고 회의록 양식을 만듭니다 |
 | 장비 예약 | `equipment/` | 캘린더 예약, 사용 로그, 로그 미작성자 예약 차단, 담당자별 사용자 등급 관리 |
@@ -59,6 +59,7 @@ dsil-portal/
 │       ├── config.js           모든 설정값 (PIN, 비목, 규칙, 기본 계정, 초기화)
 │       ├── ui.js               공용 UI 헬퍼 (esc, won, 모달, 토스트, readForm …)
 │       ├── store.js            데이터 계층 (local / supabase 어댑터)
+│       ├── budget-core.js      과제 예산 계산 (세목·기준 잔액·긴급도·배정 추천). budget·meeting 공용
 │       └── portal.js budget.js report.js meeting.js equipment.js inventory.js
 ├── supabase/schema.sql         공용 DB 스키마·RLS·서버 함수 (아직 미사용)
 └── docs/TECHNICAL.md           이 문서
@@ -82,7 +83,7 @@ dsil-portal/
 ### supabase 모드 (준비됨, 미가동)
 
 - `supabase/schema.sql`을 Supabase SQL Editor에서 실행하고 `config.js`의 `backend`, `supabaseUrl`, `supabaseAnonKey`를 채우면 연구실 전체가 같은 데이터를 봅니다.
-- 권한은 RLS(Row Level Security)와 security definer 함수로 서버에서 강제합니다. 예산은 `projects_public` 뷰가 관리자·과제 담당자에게만 내려 주고, 장비·소모품 담당자 확인은 `verify_equipment_manager`, `inv_verify_manager` 함수가 이름까지 확인합니다.
+- 권한은 RLS(Row Level Security)와 security definer 함수로 서버에서 강제합니다. 예산(`budgets`, `budget_base`)은 관리자만 읽고 구성원은 예산이 빠진 `projects_public` 뷰를 봅니다. 장비·소모품 담당자 확인은 `verify_equipment_manager`, `inv_verify_manager` 함수가 이름까지 확인합니다.
 - **실제 DB에서 실행 검증을 한 적이 없습니다.** 전환할 때 모듈별로 한 번씩 흐름을 돌려 봐야 합니다.
 
 ### store.js 규칙
@@ -96,17 +97,25 @@ dsil-portal/
 | 키 | 내용 |
 |---|---|
 | `accounts` | 이름, PIN 해시(SHA-256), role(admin/member), status, signatureKey |
-| `projects` | 과제명, 과제번호(code), 비목별 예산(budgets), alias(시트 약칭), participants, owners(과제 담당자), cardUsers, accountManager |
-| `requests` | 구매 요청과 회의비 청구. `kind`가 purchase/meeting. `report`에 보고서·회의록 JSON |
+| `projects` | 과제명, 과제번호(code), 세목별 기준 잔액(budgets), budgetBase(행정 현황 기준일·통합 잔액·집행 상태·소진 필요·집행 전 확인), alias(시트 약칭), participants, cardUsers, accountManager. owners 는 예전 값만 보존(사용 안 함) |
+| `requests` | 구매 요청과 회의비 청구. `kind`가 purchase/meeting. `report`에 보고서·회의록 JSON. 구매 요청 `meta`: cycle(구매 주기), history(new/repeat), prevPurchase, team, confirmedBy, confirmRoute(team/professor), suggestedProjectId(관련 과제), relatedUnknown, purchase{confirmedAt, confirmedBy}(구매 확정), cancelRequest{status, reason, …}(반려 신청) |
 | `reviews` | 구매 심의 (승인 시 가할당) |
 | `exports` | 보고서 내보내기 이력 (삭제 경로 없음) |
 | `equipment`, `reservations`, `usageLogs` | 장비, 예약, 사용 로그 |
 | `invManagers`, `invItems`, `invMoves` | 소모품 담당자, 품목, 입출고 |
 | `meetingLogs`, `security` | 회의비 처리 로그, 보안 이벤트 (추가만) |
 | `participationRows`, `participationImport` | 참여과제 시트 원본과 가져오기 정보 |
+| `purchaseHistory` | 구매 이력 시트. 구매 확정 때 확정 시점 스냅샷이 자동 추가, 관리자 삭제 버튼으로만 삭제, 일회성 초기화에도 유지 |
 | `dataResetId` | 적용된 일회성 초기화 id |
 
-예산 계산: **잔액 = 예산 − 실집행 − 가할당**. 실집행은 처리된 요청 합계, 가할당은 승인된 심의 승인액에서 연결된 실집행을 뺀 값입니다.
+예산 계산 (`budget-core.js` 한 곳에서만): **잔액 = 기준 잔액 − 기준일 이후 실집행 − 가할당**.
+
+- **세목(pool)**: `budgetCategories` 중 `pool` 이 없는 비목 = 연구재료비·연구활동비·연구시설·장비비 (행정 현황과 같음). 회의비(`meeting`)는 `pool: 'activity'` 라 연구활동비에서, 기타는 연구재료비에서 차감됩니다. 비목 선택 화면에는 세목 3개만 나옵니다.
+- **기준 잔액**: 관리자가 행정 연구비 현황 엑셀을 올리면 `projects.budgets` 에 그 날짜의 세목별 **잔액**이, `projects.budgetBase.date` 에 기준일이 들어갑니다. 기준일 이전에 처리한 건은 이미 행정 잔액에 반영된 것으로 보고 빼지 않습니다. 기준일이 없는 과제(직접 입력)는 처리 건을 모두 뺍니다.
+- **통합 잔액**: 세목 구분 없는 과제(신임교원정착연구비)는 `budgetBase.unified` 하나에서 모든 비목이 차감됩니다.
+- **가처리**: 승인됐지만 구매 확정 전인 구매 요청 (기준일과 관계없이 차감). 구매 확정하면 확정일 기준으로 확정 차감. 회의비는 처리 즉시 확정.
+- **가할당**: 승인된 구매 심의 승인액 − 연결된 실집행.
+- **예산은 관리자만**: 화면은 관리자 PIN 이후에만 금액을 그리고, 공용 DB 에서는 `projects`(budgets·budget_base) 를 관리자만 읽습니다. 예전의 과제 담당자(owners) 열람은 없앴습니다.
 
 ---
 
@@ -114,8 +123,10 @@ dsil-portal/
 
 ### 구매 요청 → 보고서 → 검수
 
-1. 구성원이 구매 요청 (`status: pending`).
-2. 관리자가 과제·비목을 배정 (`status: done`). 예산에서 실집행으로 차감.
+0. 컨펌: `purchaseRequest.professorThreshold`(500만원) 이하는 팀(CP·RF·Logic·Memory·DB) 중간관리자, 초과는 구매행정 시스템으로 교수님. 포털 밖에서 받고, 요청에 팀·컨펌한 사람을 적습니다 (포닥 검수자와 별개).
+1. 구성원이 구매 요청 (`status: pending`). 사용 용도(필수, `usageMinLength` 이상)·구매 주기·팀·컨펌한 사람·가장 관련 있는 과제(`meta.suggestedProjectId`, "모름" 가능).
+2. 관리자가 과제·비목을 골라 **승인**(항상 "승인하시겠습니까?" 팝업, `status: done`). 요청자 관련 과제가 기본 선택되고 ★로 맨 위에, 그 아래 추천 3개. 예산에는 **가처리**. 확정 전에는 관리자 승인 취소(→ pending), 구매자 반려 신청(`requestPurchaseCancel` → 관리자 `resolvePurchaseCancel`) 가능.
+2-1. 구매자가 보고서 화면에서 **구매 확정**(`confirmPurchase`): 보고서 저장 + `meta.purchase` + 구매 이력 시트 추가 → 예산 확정 차감. 확정 후에는 승인 취소·반려 신청 불가. 공용 DB 는 `confirm_purchase`·`request_purchase_cancel`·`resolve_purchase_cancel` 함수가 권한을 확인.
 3. 물품 도착 후 작성자가 보고서 작성. 영수증·거래내역 사진, 50만원 초과면 검수 사진 2장 이상.
 4. **검수 요청** (`report.status: submitted`, 화면 표시 "검수 대기").
 5. 포닥 검수자(`config.report.inspectors`: 조영민·정학순·이용우) 또는 관리자가 승인 (`verified`, "검수 완료"). 승인자 이름과 그 계정의 서명 이미지가 검수자 칸에 들어갑니다. 보완 요청 시 `draft`로 돌아갑니다.
@@ -141,6 +152,14 @@ dsil-portal/
 
 - 담당자 이름과 로그인 이름이 같아야 담당자 탭이 열림. 수량만 관리.
 
+### 과제 예산 (관리자)
+
+1. 2주마다 행정 연구비 현황 엑셀을 **구매 요청 > 관리자 > 연구비 현황 엑셀 올리기**로 올림. 브라우저 안에서 SheetJS 로 읽고(서버 전송 없음), `과제명`·`구분` 머리글 행을 찾아 열 이름(장비·재료·활동·현재 잔액·집행 상태·비고)으로 매핑. 기준일은 위쪽 안내 문구의 날짜 → 파일명 yymmdd 순.
+2. 미리보기에서 과제 연결(`budget.aliasMap` → 약칭/과제명 일치 → 새 과제)과 제외(`budget.excludeAliases`, 포함 검사) 확인 후 적용. 과제번호·참여자는 유지되고 과제명·기간·세목 잔액·`budgetBase` 가 갱신됨.
+3. 집행 상태 문구에 "소진"이 있으면 올해 소진 필요(must), "확인"이 있거나 기간이 없으면 집행 전 확인(check). 긴급도 순서: must → 종료 임박(`mustSpendDays` 이내) → 여유 → check.
+4. 추천: 잔액 충분 → must → 종료일 → 요청자 참여 과제. check 과제는 배정 때 한 번 더 확인. 추천 버튼은 일반 배정과 같은 초과 확인을 거침.
+5. 기준일 직전 `recentCheckDays`(7일) 안에 처리한 건은 "행정 반영 확인" 목록에 뜸. 기준일이 `refreshDays`(14일)를 넘으면 갱신 안내.
+
 ---
 
 ## 5. 자주 하는 수정
@@ -153,7 +172,12 @@ dsil-portal/
 | 검수자 변경 | `report.inspectors` |
 | 계정책임자 기본값 | `report.defaultAccountManager` |
 | 회의비 한도·과제별 규칙 | `meeting.perPersonMax`, `meeting.projectRules` |
-| 비목 추가 | `budgetCategories`. **id는 저장 키라 운영 중 바꾸면 안 됨**, label만 자유 |
+| 비목 추가 | `budgetCategories`. **id는 저장 키라 운영 중 바꾸면 안 됨**, label만 자유. 세목이 아니면 `pool` 로 차감할 세목 지정 |
+| 팀·중간관리자, 교수님 컨펌 기준 | `purchaseRequest.teams`(manager 이름), `purchaseRequest.professorThreshold` |
+| 구매 주기 선택지, 사용 용도 최소 글자 | `purchaseRequest.cycles`, `purchaseRequest.usageMinLength` |
+| 예산 관리 제외 과제 | `budget.excludeAliases` (이름에 포함되면 제외) |
+| 행정 엑셀 구분 ↔ 시트 약칭 | `budget.aliasMap` |
+| 현황 갱신 주기·종료 임박 기준 | `budget.refreshDays`, `budget.mustSpendDays`, `budget.recentCheckDays` |
 | 장비 기본값 | `defaultEquipment` |
 | 관리자 PIN | `adminPin` |
 | 기록 한 번에 지우기 | `dataReset.id`를 새 값으로, 지울 항목 플래그만 true (아래 참고) |
@@ -218,3 +242,5 @@ dsil-portal/
 - 구글 캘린더 연동 (방식 결정 필요).
 - 기본 PIN 0000 변경 안내 또는 첫 로그인 시 변경 강제.
 - 출석 시트 재개 여부 결정 (`archive/`).
+- 팀별 중간관리자 선정 후 `purchaseRequest.teams[].manager` 채우기.
+- 과제 예산: 공용 DB 전환 시 관리자 한 명이 엑셀을 올리면 모두에게 반영됨 (local 모드에서는 올린 브라우저에만 있음).

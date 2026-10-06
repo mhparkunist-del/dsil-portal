@@ -22,6 +22,10 @@
      openReview(id, pin)            -> Promise<Review|null> 열람 PIN 이 맞으면 전체 필드
      listExports()                  -> Promise<ExportLog[]> (관리자) 내보내기 이력 – 지우지 않는 아카이브
      createExport(log)              -> Promise<ExportLog>
+     confirmPurchase(id, report)    -> 구매자(또는 관리자)가 보고서 저장 + 구매 확정. 구매 이력 시트에 자동 추가 (가처리 → 확정 차감)
+     requestPurchaseCancel(id, reason) -> 구매자 반려 신청 (승인 후 확정 전)
+     resolvePurchaseCancel(id, approve, note) -> (관리자) 반려 신청 승인(요청 반려) / 거절
+     listPurchaseHistory() / deletePurchaseHistory(id) -> 구매 이력 시트 (삭제는 관리자)
      onChange(cb)                   -> unsubscribe()
      exportJSON() / importJSON(obj) -> (local only)
 
@@ -107,6 +111,27 @@
     return (reportCfg(cfg).inspectors || []).some(function (n) { return nameKey(n) === nameKey(name); });
   }
 
+  /* ---------- 구매 확정 공통 규칙 ----------
+     승인(status done) 후 구매 확정 전 = 가처리, meta.purchase.confirmedAt 이 있으면 확정. 회의비는 처리 즉시 확정 */
+  function isPurchaseConfirmed(r) { return !!(r && r.meta && r.meta.purchase && r.meta.purchase.confirmedAt); }
+  function purchaseConfirmBlock(r, sess) {
+    if (!r) return '요청을 찾을 수 없습니다.';
+    if (r.kind === 'meeting') return '회의비는 구매 확정 대상이 아닙니다.';
+    if (r.requesterId !== sess.user.id && !sess.isAdmin) return '요청자 본인만 구매를 확정할 수 있습니다.';
+    if (r.status !== 'done') return '관리자 승인 후에 구매를 확정할 수 있습니다.';
+    if (isPurchaseConfirmed(r)) return '이미 구매 확정된 요청입니다.';
+    if (r.meta && r.meta.cancelRequest && r.meta.cancelRequest.status === 'pending') return '반려 신청 중인 요청입니다. 관리자 처리 후 다시 시도하세요.';
+    return '';
+  }
+  /* 구매 이력 시트 한 줄: 확정 시점 스냅샷 (요청·과제가 바뀌거나 지워져도 그대로 남음) */
+  function purchaseHistoryEntry(r, p, by, at) {
+    var m = r.meta || {};
+    return { id: uid(), requestId: r.id, confirmedAt: at, confirmedBy: by, requestedAt: r.createdAt, requesterName: r.requesterName,
+      item: r.item, detail: r.note || '', link: r.link || '', qty: r.qty, unitPrice: r.unitPrice, amount: r.amount, category: r.category,
+      projectId: r.projectId, projectName: p ? (p.alias || p.name) : '', projectCode: p ? (p.code || '') : '',
+      team: m.team || '', confirmer: m.confirmedBy || '', cycle: m.cycle || '', history: m.history || '', approvedAt: r.processedAt, approvedBy: r.processedBy || '' };
+  }
+
   /* ---------- 출석 공통 규칙 ---------- */
   var ATT_KEY = 'dsil-att-session-v1';
   function attendanceCfg(cfg) { return Object.assign({ openAfter: '06:00', lateAfter: '09:00', closeAfter: '11:00', vacationDaysPerHalf: 2, selfRegister: true, holidays: {} }, cfg.attendance || {}); }
@@ -144,7 +169,7 @@
   /* 빈 데이터: migrate() 가 관리자 계정(관리자 / 0000)과 공휴일 초기값만 채움 */
   function emptyData() {
     return { accounts: [], projects: [], requests: [], reviews: [], exports: [], equipment: [], reservations: [], usageLogs: [],
-      attMembers: [], attRecords: [], attLeaves: [], attHolidays: null, invManagers: [], invItems: [], invMoves: [], security: [], participationImport: null, participationRows: [], meetingLogs: [], dataResetId: null };
+      attMembers: [], attRecords: [], attLeaves: [], attHolidays: null, invManagers: [], invItems: [], invMoves: [], security: [], participationImport: null, participationRows: [], meetingLogs: [], purchaseHistory: [], dataResetId: null };
   }
 
   /* ------------------------------------------------------------------ */
@@ -365,13 +390,15 @@
       delete p.budget;
       if (p.accountManager === undefined) p.accountManager = '';
       if (!Array.isArray(p.cardUsers)) p.cardUsers = [];   /* 카드 실사용자(참여연구원) 목록 */
-      if (!Array.isArray(p.owners)) p.owners = [];            /* 과제 담당자 이름 목록 — 관리자가 아니어도 이 과제 예산을 봄 */
+      if (!Array.isArray(p.owners)) p.owners = [];            /* 예전 과제 담당자 목록 (예산 열람은 이제 관리자만, 값만 보존) */
+      if (p.budgetBase === undefined) p.budgetBase = null;     /* 행정 연구비 현황 기준 { date, source, unified, status, note, mustSpend, checkFirst, open } */
       if (p.alias === undefined) p.alias = '';               /* 참여과제 시트의 과제 약칭 */
       if (!Array.isArray(p.participants)) p.participants = []; /* [{ name, months:{ '2026-09': true } }] 회의비 참석자 후보 */
     });
     if (data.participationImport === undefined) data.participationImport = null;
     if (!Array.isArray(data.participationRows)) data.participationRows = [];
     if (!Array.isArray(data.meetingLogs)) data.meetingLogs = [];   /* 회의비 처리 로그 (추가만, 삭제 없음) */
+    if (!Array.isArray(data.purchaseHistory)) data.purchaseHistory = [];   /* 구매 확정 이력 시트 (확정 때 자동 추가, 관리자 삭제 버튼으로만 삭제, 초기화에도 유지) */
     (data.requests || []).forEach(function (r) {
       if (!r.category || ids.indexOf(r.category) < 0) r.category = first;
       if (r.reviewId === undefined) r.reviewId = null;
@@ -796,6 +823,69 @@
         }
         write(); emit();
         return Promise.resolve(clone(r.report));
+      },
+
+      /* ---------- 구매 확정 · 반려 신청 · 구매 이력 ---------- */
+      /* 구매자(또는 관리자)가 보고서를 저장하면서 구매를 확정 → 예산이 가처리에서 확정 차감으로, 구매 이력 시트에 자동 기록 */
+      confirmPurchase: function (requestId, report) {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var r = data.requests.filter(function (x) { return x.id === requestId; })[0];
+        var why = purchaseConfirmBlock(r, session);
+        if (why) return Promise.reject(new Error(why));
+        var now = nowISO();
+        var prev = r.report || {};
+        var rec = Object.assign({}, prev, report || {}, { updatedAt: now, updatedBy: session.user.name });
+        if (!rec.createdAt) rec.createdAt = now;
+        if (!rec.status) rec.status = 'draft';
+        r.report = rec;
+        r.meta = Object.assign({}, r.meta || {}, { purchase: { confirmedAt: now, confirmedBy: session.user.name } });
+        var p = data.projects.filter(function (x) { return x.id === r.projectId; })[0] || null;
+        var entry = purchaseHistoryEntry(r, p, session.user.name, now);
+        data.purchaseHistory.unshift(entry);
+        write(); emit();
+        return Promise.resolve(clone(entry));
+      },
+
+      /* 구매자의 반려 신청: 승인 후 구매 확정 전까지만 */
+      requestPurchaseCancel: function (requestId, reason) {
+        var err = needSession(); if (err) return Promise.reject(err);
+        var r = data.requests.filter(function (x) { return x.id === requestId; })[0];
+        if (!r) return Promise.reject(new Error('요청을 찾을 수 없습니다.'));
+        if (r.requesterId !== session.user.id) return Promise.reject(new Error('본인 요청만 반려 신청할 수 있습니다.'));
+        if (r.status !== 'done') return Promise.reject(new Error('관리자가 승인한 요청만 반려 신청할 수 있습니다. 미처리 요청은 직접 취소하세요.'));
+        if (isPurchaseConfirmed(r)) return Promise.reject(new Error('구매 확정된 요청은 반려 신청할 수 없습니다.'));
+        if (!String(reason || '').trim()) return Promise.reject(new Error('반려 신청 사유를 적어 주세요.'));
+        r.meta = Object.assign({}, r.meta || {}, { cancelRequest: { status: 'pending', at: nowISO(), by: session.user.name, reason: String(reason).trim() } });
+        write(); emit();
+        return Promise.resolve(clone(r));
+      },
+
+      /* 관리자: 반려 신청 승인(요청 반려, 예산 가처리 해제) 또는 거절 */
+      resolvePurchaseCancel: function (requestId, approve, note) {
+        if (!session || !session.isAdmin) return Promise.reject(new Error('관리자만 처리할 수 있습니다.'));
+        var r = data.requests.filter(function (x) { return x.id === requestId; })[0];
+        var cr = r && r.meta && r.meta.cancelRequest;
+        if (!cr || cr.status !== 'pending') return Promise.reject(new Error('처리할 반려 신청이 없습니다.'));
+        var now = nowISO();
+        r.meta = Object.assign({}, r.meta, { cancelRequest: Object.assign({}, cr, { status: approve ? 'approved' : 'denied', resolvedAt: now, resolvedBy: session.user.name, resolvedNote: String(note || '').trim() }) });
+        if (approve) {
+          r.status = 'rejected'; r.projectId = null; r.processedAt = now; r.processedBy = session.user.name;
+          r.adminNote = '구매자 반려 신청 승인: ' + cr.reason + (note ? ' (' + String(note).trim() + ')' : '');
+        }
+        write(); emit();
+        return Promise.resolve(clone(r));
+      },
+
+      listPurchaseHistory: function () {
+        var err = needSession(); if (err) return Promise.reject(err);
+        return Promise.resolve(clone(data.purchaseHistory));
+      },
+      /* 구매 이력은 관리자가 삭제 버튼을 눌러야만 지워짐 (요청을 지워도 남음) */
+      deletePurchaseHistory: function (id) {
+        if (!session || !session.isAdmin) return Promise.reject(new Error('관리자만 구매 이력을 삭제할 수 있습니다.'));
+        data.purchaseHistory = data.purchaseHistory.filter(function (x) { return x.id !== id; });
+        write(); emit();
+        return Promise.resolve();
       },
 
       setMySignature: function (key) {
@@ -1380,6 +1470,7 @@
       accountManager: row.account_manager || '', cardUsers: Array.isArray(row.card_users) ? row.card_users : [],
       owners: Array.isArray(row.owners) ? row.owners : [],
       alias: row.alias || '', participants: Array.isArray(row.participants) ? row.participants : [],
+      budgetBase: (row.budget_base && typeof row.budget_base === 'object' && row.budget_base.date) ? row.budget_base : null,
       note: row.note || '', active: row.active !== false, createdAt: row.created_at
     };
   }
@@ -1396,6 +1487,7 @@
       note: p.note || '', active: p.active !== false
     };
     if (p.id) out.id = p.id;
+    if ('budgetBase' in p) out.budget_base = p.budgetBase || {};   /* 행정 현황 기준 (관리자만 읽음) */
     return out;
   }
 
@@ -1429,6 +1521,13 @@
       status: row.status, projectId: row.project_id || null, approvedAmount: row.approved_amount === null || row.approved_amount === undefined ? null : Number(row.approved_amount),
       adminNote: row.admin_note || '', processedAt: row.processed_at || null, processedBy: row.processed_by_name || null
     };
+  }
+
+  function toPurchaseHistory(r) {
+    return { id: r.id, requestId: r.request_id, confirmedAt: r.confirmed_at, confirmedBy: r.confirmed_by || '', requestedAt: r.requested_at, requesterName: r.requester_name || '',
+      item: r.item || '', detail: r.detail || '', link: r.link || '', qty: Number(r.qty) || 1, unitPrice: Number(r.unit_price) || 0, amount: Number(r.amount) || 0, category: r.category || '',
+      projectId: r.project_id || null, projectName: r.project_name || '', projectCode: r.project_code || '', team: r.team || '', confirmer: r.confirmer || '', cycle: r.cycle || '',
+      history: r.history || '', approvedAt: r.approved_at || null, approvedBy: r.approved_by || '' };
   }
 
   function toReviewLimited(row) {
@@ -1695,6 +1794,21 @@
           return client.from('requests').update({ report: rec }).eq('id', requestId).then(unwrap).then(function () { return rec; });
         });
       },
+      /* ---------- 구매 확정 · 반려 신청 · 구매 이력 (권한 확인은 서버 함수) ---------- */
+      confirmPurchase: function (requestId, report) {
+        return client.rpc('confirm_purchase', { p_id: requestId, p_report: report || {} }).then(unwrap).then(function (rows) { return rows && rows.length ? toPurchaseHistory(rows[0]) : null; });
+      },
+      requestPurchaseCancel: function (requestId, reason) {
+        return client.rpc('request_purchase_cancel', { p_id: requestId, p_reason: String(reason || '').trim() }).then(unwrap).then(toRequest);
+      },
+      resolvePurchaseCancel: function (requestId, approve, note) {
+        return client.rpc('resolve_purchase_cancel', { p_id: requestId, p_approve: !!approve, p_note: String(note || '').trim() }).then(unwrap).then(toRequest);
+      },
+      listPurchaseHistory: function () {
+        return client.from('purchase_history').select('*').order('confirmed_at', { ascending: false }).then(unwrap).then(function (rows) { return rows.map(toPurchaseHistory); });
+      },
+      deletePurchaseHistory: function (id) { return client.from('purchase_history').delete().eq('id', id).then(unwrap).then(function () {}); },
+
       setMySignature: function (key) { var u = currentUser(); if (!u) return Promise.reject(new Error('로그인이 필요합니다.')); return client.from('profiles').update({ signature_key: key || null }).eq('id', u.id).then(unwrap).then(function () {}); },
       getAccount: function (id) { return client.from('profiles').select('id, name, email, is_admin, status, created_at, signature_key').eq('id', id).maybeSingle().then(unwrap).then(function (p) { return p ? { id: p.id, name: p.name || p.email, role: p.is_admin ? 'admin' : 'member', status: p.status, createdAt: p.created_at, signatureKey: p.signature_key || null } : null; }); },
       signatureByName: function (name) {

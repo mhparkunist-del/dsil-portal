@@ -1,24 +1,50 @@
 /* =====================================================================
    DSIL Lab Portal – 과제별 예산 관리 (UI, Tabler 컴포넌트 사용)
-   탭: 구매 요청 · 요청 조회 · 구매 심의 · 과제 예산(관리자) · 관리자(PIN)
+   탭: 구매 요청 · 요청 조회 · 구매 심의 · 관리자(PIN: 미처리 배정 + 과제 예산 대시보드)
+   과제 예산은 관리자만 봅니다. 잔액 계산은 budget-core.js (기준 잔액 − 기준일 이후 집행 − 가할당)
    ===================================================================== */
 (function () {
   'use strict';
 
   var CFG = window.DSIL_CONFIG || {};
-  var CATS = (CFG.budgetCategories && CFG.budgetCategories.length) ? CFG.budgetCategories : [{ id: 'other', label: '기타' }];
-  var CAT_IDS = CATS.map(function (c) { return c.id; });
+  var BUD = window.DSILBudget.create(CFG);
+  var CATS = BUD.CATS;
+  var CAT_IDS = BUD.CAT_IDS;
   var TIERS = (CFG.procurementTiers && CFG.procurementTiers.length) ? CFG.procurementTiers : [{ upTo: null, label: '기준 없음', cls: 'bg-secondary-lt', desc: '' }];
   var PIN_RE = new RegExp('^' + (CFG.reviewPinPattern || '\\d{4,8}') + '$');
   var store = window.DSILStore.create(CFG);
   var UNLOCK_KEY = 'dsil-budget-admin-unlock';
-  var TABS = ['requests', 'query', 'review', 'budget', 'admin'];
+  var TABS = ['requests', 'query', 'history', 'review', 'admin'];
+  var PR = Object.assign({ teams: [], professorThreshold: 5000000, cycles: ['일회성', '매월', '비정기(필요할 때마다)'], usageMinLength: 10 }, CFG.purchaseRequest || {});
+  var USAGE_MIN = Number(PR.usageMinLength) || 0;
+  var PROF_MIN = Number(PR.professorThreshold) || 5000000;   /* 이 금액 초과: 교수님 컨펌 (구매행정) */
+  var URG = {
+    must: { label: '올해 소진 필요', cls: 'bg-red-lt', dot: 'bg-red' },
+    soon: { label: '종료 임박', cls: 'bg-orange-lt', dot: 'bg-orange' },
+    later: { label: '여유', cls: 'bg-green-lt', dot: 'bg-green' },
+    check: { label: '집행 전 확인', cls: 'bg-secondary-lt', dot: 'bg-secondary' },
+    ended: { label: '종료', cls: 'bg-secondary-lt', dot: 'bg-secondary' }
+  };
 
   var STATUS = {
     pending: { label: '미처리', cls: 'bg-yellow-lt' },
-    done: { label: '처리', cls: 'bg-blue-lt' },
+    done: { label: '승인', cls: 'bg-blue-lt' },
     rejected: { label: '반려', cls: 'bg-red-lt' }
   };
+  /* 구매 진행 상태 (budget-core purchaseState): 승인 후 구매 확정 전은 예산 가처리 */
+  var PSTATE = {
+    pending: { label: '미처리', cls: 'bg-yellow-lt' },
+    provisional: { label: '승인 · 가처리', cls: 'bg-blue-lt' },
+    cancelRequested: { label: '반려 신청 중', cls: 'bg-orange-lt' },
+    confirmed: { label: '구매 확정', cls: 'bg-green-lt' },
+    rejected: { label: '반려', cls: 'bg-red-lt' }
+  };
+  function stateBadge(r) {
+    var s = BUD.purchaseState(r);
+    if (r.kind === 'meeting' && s === 'confirmed') return '<span class="badge bg-blue-lt">처리</span>';
+    var S = PSTATE[s] || { label: s, cls: 'bg-secondary-lt' };
+    return '<span class="badge ' + S.cls + '">' + S.label + '</span>';
+  }
   var RSTATUS = {
     pending: { label: '심의 중', cls: 'bg-yellow-lt' },
     approved: { label: '승인', cls: 'bg-green-lt' },
@@ -41,6 +67,7 @@
     requests: [],
     reviews: [],
     reviewsFull: false,
+    budgetSort: 'urgency',
     tab: 'requests',
     editingProjectId: null,
     magicLinkSent: false,
@@ -49,7 +76,9 @@
     exports: [],
     exportFilter: { preset: 'month', from: '', to: '', projectId: 'all', includeRequests: true, includeReviews: true },
     exportSel: null,          /* null = 목록 전체 선택, 아니면 { key: true } */
-    exportPurpose: ''
+    exportPurpose: '',
+    history: [],              /* 구매 이력 시트 (구매 확정 때 자동 추가) */
+    historyQ: ''
   };
 
   /* ---------- helpers ---------- */
@@ -144,12 +173,98 @@
     return id || '-';
   }
   function normCat(id) { return CAT_IDS.indexOf(id) >= 0 ? id : CAT_IDS[0]; }
+  function poolOf(id) { return BUD.poolOf(id); }
   function budgetOf(p, cat) { return Number(p.budgets && p.budgets[cat]) || 0; }
+  /* 고를 수 있는 비목은 행정 세목(연구재료비·연구활동비·연구시설·장비비)만. 회의비 등은 해당 세목으로 */
   function catOptions(selected, withAll) {
-    return (withAll ? '<option value="all">모든 비목</option>' : '') + CATS.map(function (c) {
-      return '<option value="' + esc(c.id) + '"' + (c.id === selected ? ' selected' : '') + '>' + esc(c.label) + '</option>';
+    var sel = selected === 'all' ? 'all' : poolOf(selected);
+    return (withAll ? '<option value="all"' + (sel === 'all' ? ' selected' : '') + '>모든 세목</option>' : '') + BUD.POOLS.map(function (c) {
+      return '<option value="' + esc(c.id) + '"' + (c.id === sel ? ' selected' : '') + '>' + esc(c.label) + '</option>';
     }).join('');
   }
+  function cycleOptions(selected) {
+    return '<option value="">선택…</option>' + PR.cycles.map(function (c) { return '<option value="' + esc(c) + '"' + (c === selected ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('')
+      + (selected && PR.cycles.indexOf(selected) < 0 ? '<option value="' + esc(selected) + '" selected>' + esc(selected) + '</option>' : '');
+  }
+  /* 구매 컨펌: 팀(중간관리자) · 관련 과제 */
+  function teamManager(id) { var t = PR.teams.filter(function (x) { return x.id === id; })[0]; return t && t.manager ? t.manager : ''; }
+  function teamOptions(selected) {
+    return '<option value="">팀 선택…</option>' + PR.teams.map(function (t) {
+      return '<option value="' + esc(t.id) + '"' + (t.id === selected ? ' selected' : '') + '>' + esc(t.id) + (t.manager ? ' · 중간관리자 ' + esc(t.manager) : '') + '</option>';
+    }).join('');
+  }
+  /* 구성원이 고르는 관련 과제: 이름만 (예산 정보 없음), 예산 관리 제외 과제는 빼고 */
+  function relatedOptions(selected) {
+    var list = state.projects.filter(function (p) { return BUD.isManaged(p) || p.id === selected; })
+      .sort(function (a, b) { return String(a.alias || a.name).localeCompare(String(b.alias || b.name), 'ko'); });
+    return '<option value="">과제 선택…</option>' + list.map(function (p) {
+      var full = p.alias && p.alias !== p.name ? ' · ' + (p.name.length > 26 ? p.name.slice(0, 26) + '…' : p.name) : '';
+      return '<option value="' + esc(p.id) + '"' + (p.id === selected ? ' selected' : '') + ' title="' + esc(p.name) + '">' + esc((p.alias || p.name) + full) + '</option>';
+    }).join('') + '<option value="unknown"' + (selected === 'unknown' ? ' selected' : '') + '>잘 모르겠음 (관리자가 판단)</option>';
+  }
+  /* 이전 구매 이력: 구매 이력 시트 + 지금까지 승인된 구매 요청에서 품명이 겹치는 건 (공백·대소문자 무시) */
+  /* 품명을 낱말로 쪼개 3글자 이상 낱말이 하나라도 겹치면 같은 물품으로 봄 (수량·단위 낱말은 제외: 1L, 500mL, 25매 …) */
+  function itemTokens(s) {
+    return String(s || '').toLowerCase().split(/[\s\-_,.()\[\]/+·]+/).filter(function (t) {
+      return t.length >= 3 && !/^\d+(\.\d+)?(l|ml|g|kg|mg|ea|매|개|병|박스|box|set|m|mm|cm|inch|인치)?$/.test(t);
+    });
+  }
+  function previousPurchases(item) {
+    var mine = itemTokens(item);
+    if (!mine.length) return [];
+    function hit(name) { var ts = itemTokens(name); return ts.some(function (t) { return mine.indexOf(t) >= 0; }); }
+    var seen = {}, out = [];
+    state.history.forEach(function (h) {
+      if (!hit(h.item)) return;
+      seen[h.requestId] = 1;
+      out.push({ at: h.confirmedAt, by: h.requesterName, item: h.item, amount: h.amount, project: h.projectName, confirmed: true });
+    });
+    state.requests.forEach(function (r) {
+      if (r.kind === 'meeting' || r.status !== 'done' || seen[r.id] || !hit(r.item)) return;
+      var p = projectById(r.projectId);
+      out.push({ at: r.processedAt || r.createdAt, by: r.requesterName, item: r.item, amount: r.amount, project: p ? (p.alias || p.name) : '', confirmed: BUD.isConfirmed(r) });
+    });
+    return out.sort(function (a, b) { return String(b.at).localeCompare(String(a.at)); });
+  }
+  function historyHintHtml(item) {
+    var list = previousPurchases(item);
+    if (!list.length) return String(item || '').trim().length >= 3 ? '<span class="text-secondary"><i class="ti ti-search me-1"></i>포털에 이전 구매 이력이 없습니다.</span>' : '';
+    return '<div class="alert alert-azure py-2 mb-0"><i class="ti ti-history me-1"></i><strong>이전 구매 이력 ' + list.length + '건</strong>'
+      + list.slice(0, 3).map(function (x) { return '<div class="small">' + fmtDate(x.at) + ' · ' + esc(x.by) + ' · ' + esc(x.item) + ' · <span class="tnum">' + won(x.amount) + '</span>' + (x.project ? ' · ' + esc(x.project) : '') + (x.confirmed ? '' : ' <span class="text-secondary">(구매 확정 전)</span>') + '</div>'; }).join('')
+      + (list.length > 3 ? '<div class="small text-secondary">외 ' + (list.length - 3) + '건 · 구매 이력 탭에서 전체 보기</div>' : '') + '</div>';
+  }
+
+  function relatedName(r) {
+    if (r.kind === 'meeting' || !r.meta) return '';
+    var p = r.meta.suggestedProjectId ? projectById(r.meta.suggestedProjectId) : null;
+    return p ? (p.alias || p.name) : (r.meta.relatedUnknown ? '모름' : '');
+  }
+  function needsProfessor(amount) { return (Number(amount) || 0) > PROF_MIN; }
+  function confirmGuideHtml(amount) {
+    return needsProfessor(amount)
+      ? '<div class="alert alert-warning py-2 mb-0 small"><i class="ti ti-alert-triangle me-1"></i><strong>' + won(PROF_MIN) + ' 초과</strong>: 구매행정 시스템으로 <strong>교수님 컨펌</strong>을 받은 뒤 올려 주세요. 컨펌한 사람에 교수님 성함을 적습니다.</div>'
+      : '<div class="alert alert-secondary py-2 mb-0 small"><i class="ti ti-users me-1"></i><strong>' + won(PROF_MIN) + ' 이하</strong>: 팀 <strong>중간관리자</strong>가 컨펌합니다. 교수님 컨펌이 꼭 필요한 물품은 중간관리자가 판단해 교수님께 컨펌받습니다.</div>';
+  }
+  function confirmBadges(r) {
+    var m = r.meta || {};
+    if (!m.team && !m.confirmedBy) return '';
+    return '<span class="badge bg-azure-lt me-1" title="팀 · 컨펌한 사람"><i class="ti ti-user-check me-1"></i>' + esc([m.team, m.confirmedBy ? m.confirmedBy + ' 컨펌' : ''].filter(Boolean).join(' · ')) + '</span>';
+  }
+
+  /* 빠진 항목은 빨간 테두리 + 토스트로 알림 (버튼은 잠그지 않음) */
+  function markMissing(form, checks) {
+    $all('.is-invalid', form).forEach(function (el) { el.classList.remove('is-invalid'); });
+    var miss = [], first = null;
+    checks.forEach(function (c) {
+      if (c.ok) return;
+      miss.push(c.label);
+      var el = form.querySelector('[name="' + c.name + '"]');
+      if (el) { el.classList.add('is-invalid'); if (!first) first = el; }
+    });
+    if (miss.length) { toast('빠진 항목: ' + miss.join(', '), true); if (first) first.focus(); }
+    return !miss.length;
+  }
+
   function tierOf(amount) {
     var a = Number(amount) || 0;
     for (var i = 0; i < TIERS.length; i++) {
@@ -184,19 +299,6 @@
   function isAdminActive() { return isAdminEligible() && state.adminUnlocked; }
   function touchUnlock() { if (state.adminUnlocked) setUnlock(true); }
 
-  /* ---------- 과제 담당자: 관리자가 아니어도 본인 담당 과제의 예산을 봄 ---------- */
-  function nameKey(s) { return String(s || '').replace(/\s+/g, '').toLowerCase(); }
-  function isProjectOwner(p) {
-    if (!state.session || !p || !Array.isArray(p.owners)) return false;
-    var me = nameKey(state.session.user.name);
-    return p.owners.some(function (n) { return nameKey(n) === me; });
-  }
-  function ownedProjects() { return state.projects.filter(isProjectOwner); }
-  function isOwnerAnywhere() { return ownedProjects().length > 0; }
-  /* 예산 화면에 보여줄 과제: 관리자는 전체, 담당자는 본인 과제만 */
-  function visibleBudgetProjects() { return isAdminActive() ? state.projects.slice() : ownedProjects(); }
-  function canSeeBudgets() { return isAdminActive() || isOwnerAnywhere(); }
-
   function enterAdmin(target) {
     target = target || 'admin';
     if (!isAdminEligible()) { toast('관리자 권한이 없습니다.', true); return; }
@@ -227,36 +329,16 @@
   function reviewApproved(rv) { return Number(rv.approvedAmount !== null && rv.approvedAmount !== undefined ? rv.approvedAmount : rv.amount) || 0; }
   function reviewProvisional(rv) { return rv.status === 'approved' ? Math.max(0, reviewApproved(rv) - reviewActual(rv)) : 0; }
 
-  /* 과제별·비목별 집계: 실집행(처리된 구매건) + 가할당(승인된 심의의 미집행분) */
+  /* 과제 집계 (budget-core). 세목별 기준 잔액 − 기준일 이후 실집행 − 가할당(승인된 구매 심의 중 미집행).
+     byCat[비목] 은 그 비목이 차감되는 세목(통합 잔액 과제는 통합) 집계를 가리킴 */
+  function budgetCtx() { return { requests: state.requests, reviews: state.reviewsFull ? state.reviews : [] }; }
   function projectStats(p) {
+    var s = BUD.stats(p, budgetCtx());
     var byCat = {};
-    CAT_IDS.forEach(function (c) { byCat[c] = { budget: budgetOf(p, c), actual: 0, provisional: 0, count: 0, reviews: 0 }; });
-    state.requests.forEach(function (r) {
-      if (r.status !== 'done' || r.projectId !== p.id) return;
-      var b = byCat[normCat(r.category)];
-      b.actual += Number(r.amount) || 0;
-      b.count++;
-    });
-    if (state.reviewsFull) {
-      state.reviews.forEach(function (rv) {
-        if (rv.status !== 'approved' || rv.projectId !== p.id) return;
-        var b = byCat[normCat(rv.category)];
-        b.provisional += reviewProvisional(rv);
-        b.reviews++;
-      });
-    }
-    var total = 0, actual = 0, provisional = 0, count = 0;
-    CAT_IDS.forEach(function (c) {
-      var b = byCat[c];
-      b.committed = b.actual + b.provisional;
-      b.remain = b.budget - b.committed;
-      b.ratio = b.budget > 0 ? b.committed / b.budget : (b.committed > 0 ? 1 : 0);
-      b.actualRatio = b.budget > 0 ? b.actual / b.budget : 0;
-      total += b.budget; actual += b.actual; provisional += b.provisional; count += b.count;
-    });
-    var committed = actual + provisional;
-    return { total: total, actual: actual, provisional: provisional, committed: committed, remain: total - committed,
-      ratio: total > 0 ? committed / total : (committed > 0 ? 1 : 0), actualRatio: total > 0 ? actual / total : 0, count: count, byCat: byCat };
+    CAT_IDS.forEach(function (c) { byCat[c] = s.unified ? s.pools.unified : s.pools[poolOf(c)]; });
+    var committed = s.actual + s.provisional;
+    return { total: s.budget, actual: s.actual, provisional: s.provisional, committed: committed, remain: s.remain, unified: s.unified, pools: s.pools,
+      ratio: s.budget > 0 ? committed / s.budget : (committed > 0 ? 1 : 0), actualRatio: s.budget > 0 ? s.actual / s.budget : 0, byCat: byCat };
   }
 
   function summary() {
@@ -273,7 +355,7 @@
       if (isMine(rv)) { if (rv.status === 'pending') s.my.rvPending++; else if (rv.status === 'approved') s.my.rvApproved++; else if (rv.status === 'rejected') s.my.rvRejected++; }
     });
     state.projects.forEach(function (p) {
-      if (p.active === false) return;
+      if (!BUD.isManaged(p)) return;
       var st = projectStats(p);
       s.activeProjects++;
       s.totalBudget += st.total; s.totalActual += st.actual; s.totalProvisional += st.provisional; s.totalRemain += st.remain;
@@ -297,7 +379,7 @@
       if (from && d < from) return false;
       if (to && d > to) return false;
       if (q.status !== 'all' && r.status !== q.status) return false;
-      if (q.category !== 'all' && normCat(r.category) !== q.category) return false;
+      if (q.category !== 'all' && poolOf(r.category) !== q.category) return false;
       if (q.projectId === 'none' && r.projectId) return false;
       if (q.projectId !== 'all' && q.projectId !== 'none' && r.projectId !== q.projectId) return false;
       if (q.mine && !isMine(r)) return false;
@@ -329,14 +411,16 @@
       store.listProjects(),
       store.listRequests(),
       state.session ? store.listReviews({ full: full }) : Promise.resolve([]),
-      full ? store.listExports() : Promise.resolve([])
+      full ? store.listExports() : Promise.resolve([]),
+      state.session && store.listPurchaseHistory ? store.listPurchaseHistory() : Promise.resolve([])
     ]).then(function (res) {
       state.projects = res[0];
       state.requests = res[1].slice().sort(byNewest);
       state.reviews = res[2].slice().sort(byNewest);
       state.exports = res[3].slice().sort(byNewest);
+      state.history = res[4] || [];
       state.reviewsFull = full;
-      /* 볼 수 없는 탭만 되돌림 (예산 탭은 과제 담당자도 볼 수 있으므로 render 에서 판단) */
+      if (state.tab === 'budget') state.tab = 'admin';   /* 예전 주소(#budget) */
       if (state.tab === 'admin' && !isAdminActive()) state.tab = 'requests';
     });
   }
@@ -362,38 +446,32 @@
       html = '<div class="row row-deck row-cards mb-3">'
         + stat('미처리 구매건', sum.pendingCount + '건', won(sum.pendingAmount) + ' 대기 중', 'text-yellow', 'col-6 col-lg-3')
         + stat('심의 대기', sum.reviewPending + '건', '구매 심의 승인 대기', sum.reviewPending ? 'text-orange' : '', 'col-6 col-lg-3')
-        + stat('총 예산', won(sum.totalBudget), '실집행 ' + won(sum.totalActual) + ' · 가할당 ' + won(sum.totalProvisional), 'text-primary', 'col-6 col-lg-3')
-        + stat('잔여 예산', won(sum.totalRemain), sum.totalBudget > 0 ? '사용률 ' + Math.round((sum.totalActual + sum.totalProvisional) / sum.totalBudget * 100) + '% (실+가)' : '', '', 'col-6 col-lg-3')
+        + stat('현재 잔액', won(sum.totalRemain), '기준 ' + won(sum.totalBudget) + ' − 집행 ' + won(sum.totalActual) + ' − 가처리·가할당 ' + won(sum.totalProvisional), 'text-primary', 'col-6 col-lg-3')
+        + stat('올해 소진 필요', won(mustSpendSummary().total), mustSpendSummary().count + '개 과제 · 이월불가·종료', mustSpendSummary().total > 0 ? 'text-red' : '', 'col-6 col-lg-3')
         + '</div>';
     } else {
-      var owned = ownedProjects();
-      var oStat = owned.reduce(function (acc, p) { var s = projectStats(p); acc.total += s.total; acc.actual += s.actual; acc.prov += s.provisional; acc.remain += s.remain; return acc; }, { total: 0, actual: 0, prov: 0, remain: 0 });
       html = '<div class="row row-deck row-cards mb-3">'
-        + stat('내 미처리 요청', sum.my.pending + '건', won(sum.my.pendingAmount) + ' 대기 중', 'text-yellow', owned.length ? 'col-6 col-md-3' : 'col-12 col-md-4')
-        + stat('내 처리 완료', sum.my.done + '건', won(sum.my.doneAmount) + ' 집행' + (sum.my.rejected ? ' · 반려 ' + sum.my.rejected + '건' : ''), 'text-primary', owned.length ? 'col-6 col-md-3' : 'col-6 col-md-4')
-        + stat('내 구매 심의', (sum.my.rvPending + sum.my.rvApproved + sum.my.rvRejected) + '건', '심의 중 ' + sum.my.rvPending + ' · 승인 ' + sum.my.rvApproved + ' · 반려 ' + sum.my.rvRejected, '', owned.length ? 'col-6 col-md-3' : 'col-6 col-md-4')
-        + (owned.length ? stat('내 담당 과제 잔액', won(oStat.remain), owned.length + '개 과제 · 예산 ' + won(oStat.total) + ' · 실집행 ' + won(oStat.actual), 'text-green', 'col-6 col-md-3') : '')
+        + stat('내 미처리 요청', sum.my.pending + '건', won(sum.my.pendingAmount) + ' 대기 중', 'text-yellow', 'col-12 col-md-4')
+        + stat('내 처리 완료', sum.my.done + '건', won(sum.my.doneAmount) + ' 집행' + (sum.my.rejected ? ' · 반려 ' + sum.my.rejected + '건' : ''), 'text-primary', 'col-6 col-md-4')
+        + stat('내 구매 심의', (sum.my.rvPending + sum.my.rvApproved + sum.my.rvRejected) + '건', '심의 중 ' + sum.my.rvPending + ' · 승인 ' + sum.my.rvApproved + ' · 반려 ' + sum.my.rvRejected, '', 'col-6 col-md-4')
         + '</div>';
     }
 
-    /* 과제 예산 탭: 관리자는 관리자 탭에 통합돼 있고, 담당자는 이 탭에서 본인 과제만 봅니다.
-       (state.tab 은 그대로 두고 화면에 그릴 탭만 계산 — 데이터 로드 전에 호출돼도 요청한 탭을 잃지 않게) */
-    var view = state.tab;
-    if (view === 'budget' && isAdminActive()) view = 'admin';
-    if (view === 'budget' && !canSeeBudgets()) view = 'requests';
+    /* 과제 예산은 관리자 탭에만 있습니다. (state.tab 은 그대로 두고 화면에 그릴 탭만 계산) */
+    var view = state.tab === 'budget' ? 'admin' : state.tab;
     if (view === 'admin' && !isAdminEligible()) view = 'requests';
     state.view = view;
     var tab = view === 'query' ? renderQueryTab()
+      : view === 'history' ? renderHistoryTab()
       : view === 'review' ? renderReviewTab()
-      : view === 'budget' ? renderBudgetTab()
       : view === 'admin' ? renderAdminTab()
       : renderRequestsTab();
 
     html += '<div class="card mb-3"><div class="card-header"><ul class="nav nav-tabs card-header-tabs" role="tablist">'
       + tabLink('requests', 'cart-plus', '구매 요청')
       + tabLink('query', 'list-search', '요청 조회')
+      + tabLink('history', 'history', '구매 이력', state.history.length ? '<span class="badge bg-green-lt ms-2">' + state.history.length + '</span>' : '')
       + tabLink('review', 'shield-check', '구매 심의', sum.my.rvPending && !isAdminActive() ? '<span class="badge bg-yellow-lt ms-2">' + sum.my.rvPending + '</span>' : '')
-      + (!isAdminActive() && isOwnerAnywhere() ? tabLink('budget', 'wallet', '내 과제 예산', '<span class="badge bg-green-lt ms-2">' + ownedProjects().length + '</span>') : '')
       + (isAdminEligible() ? tabLink('admin', state.adminUnlocked ? 'lock-open' : 'lock', '관리자 · 과제 예산', (sum.pendingCount + sum.reviewPending) && state.adminUnlocked ? '<span class="badge bg-yellow-lt ms-2">' + (sum.pendingCount + sum.reviewPending) + '</span>' : '') : '')
       + '</ul></div>' + tab.body + '</div>' + (tab.after || '');
 
@@ -463,10 +541,9 @@
       mineHtml = '<div class="text-secondary small">아직 올린 요청이 없습니다.</div>';
     } else {
       mineHtml = '<div class="list-group list-group-flush">' + mine.map(function (r) {
-        var st = STATUS[r.status] || { label: r.status, cls: 'bg-secondary-lt' };
         return '<div class="list-group-item px-0 d-flex justify-content-between align-items-center gap-2">'
           + '<div class="text-truncate"><span class="text-secondary small me-2">' + fmtDate(r.createdAt) + '</span>' + esc(r.item) + '</div>'
-          + '<div class="text-nowrap"><span class="tnum me-2">' + won(r.amount) + '</span>' + (r.status === 'done' ? reportBadge(r) : '<span class="badge ' + st.cls + '">' + st.label + '</span>') + '</div></div>';
+          + '<div class="text-nowrap"><span class="tnum me-2">' + won(r.amount) + '</span>' + stateBadge(r) + (r.status === 'done' ? ' ' + reportBadge(r) : '') + '</div></div>';
       }).join('') + '</div>';
     }
     var myApproved = state.reviews.filter(function (rv) { return isMine(rv) && rv.status === 'approved'; });
@@ -478,15 +555,32 @@
     var body = '<div class="card-body"><div class="row g-4">'
       + '<div class="col-lg-7">'
       + '<h3 class="card-title mb-3"><i class="ti ti-cart-plus me-1 text-primary"></i>구매 요청 올리기</h3>'
-      + '<form id="request-form"><div class="row g-3">'
+      + '<form id="request-form" novalidate><div class="row g-3">'
       + '<div class="col-12"><label class="form-label required">품명</label><input type="text" class="form-control" name="item" required placeholder="예: 6인치 SiO2/Si 웨이퍼 25매"></div>'
       + '<div class="col-sm-5"><label class="form-label required">비목</label><select class="form-select" name="category">' + catOptions(CAT_IDS[0]) + '</select></div>'
-      + '<div class="col-sm-7"><label class="form-label">구매처 / 링크</label><input type="url" class="form-control" name="link" placeholder="https://"></div>'
+      + '<div class="col-sm-7"><label class="form-label required">구매처 링크</label><input type="url" class="form-control" name="link" placeholder="https://"></div>'
+      + '<div class="col-12"><label class="form-label required">구매 이력</label><div class="d-flex flex-wrap gap-3">'
+      + '<label class="form-check mb-0"><input class="form-check-input" type="radio" name="history" value="new"><span class="form-check-label">신규 구매 (처음 사는 물품)</span></label>'
+      + '<label class="form-check mb-0"><input class="form-check-input" type="radio" name="history" value="repeat"><span class="form-check-label">재구매 (이전 구매 이력 있음)</span></label></div>'
+      + '<div id="history-hint" class="small mt-1"></div></div>'
       + '<div class="col-4"><label class="form-label required">수량</label><input type="number" class="form-control" name="qty" min="1" step="1" value="1" required></div>'
       + '<div class="col-4"><label class="form-label required">단가 (원)</label><input type="number" class="form-control" name="unitPrice" min="0" step="1" required placeholder="0"></div>'
       + '<div class="col-4"><label class="form-label">합계</label><input type="text" class="form-control tnum" name="amountView" readonly value="0원"></div>'
       + '<div class="col-12"><label class="form-label">관련 구매 심의 <span class="form-label-description">승인된 심의의 가할당에서 집행</span></label><select class="form-select" name="reviewId"' + (myApproved.length ? '' : ' disabled') + '>' + reviewSelect + '</select></div>'
-      + '<div class="col-12"><label class="form-label">용도 / 메모</label><textarea class="form-control" name="note" rows="2" placeholder="어떤 실험에 쓰는지, 급한지 등"></textarea></div>'
+      + '<div class="col-12"><label class="form-label required">사용 용도</label>'
+      + '<div class="alert alert-info py-2 mb-2 small"><i class="ti ti-info-circle me-1"></i><strong>어떤 용도로 쓰는지 상세히 적어 주세요.</strong> 무엇을 위해 사는지 알 수 있으면 관리자가 알맞은 과제를 배정할 수 있습니다.'
+      + '<div class="text-secondary mt-1">예: ○○ 소자 제작 시 △△ 공정 단계에서 사용되는 □□ 케미컬</div>'
+      + '<div class="text-secondary">예: 메탈 증착을 위한 증착기 유지보수용 오일 구매</div></div>'
+      + '<textarea class="form-control" name="note" rows="2" placeholder="예: 메탈 증착을 위한 증착기 유지보수용 오일 구매"></textarea></div>'
+      + '<div class="col-sm-6"><label class="form-label required">구매 주기</label><select class="form-select" name="cycle">' + cycleOptions('') + '</select>'
+      + '<div class="form-hint">같은 물품을 얼마나 자주 사는지</div></div>'
+      + '<div class="col-12"><hr class="my-1"><div class="subheader mt-2"><i class="ti ti-user-check me-1"></i>컨펌 · 관련 과제</div></div>'
+      + '<div class="col-12" id="confirm-guide">' + confirmGuideHtml(0) + '</div>'
+      + '<div class="col-sm-4"><label class="form-label required">팀</label><select class="form-select" name="team">' + teamOptions('') + '</select></div>'
+      + '<div class="col-sm-8"><label class="form-label required">컨펌한 사람</label><input type="text" class="form-control" name="confirmedBy" placeholder="팀 중간관리자 이름 (500만원 초과는 교수님)">'
+      + '<div class="form-hint">누구에게 컨펌받았는지 이름을 적어 주세요.</div></div>'
+      + '<div class="col-12"><label class="form-label required">가장 관련 있는 과제</label><select class="form-select" name="relatedProjectId">' + relatedOptions('') + '</select>'
+      + '<div class="form-hint">이 물품을 쓰는 연구와 가장 가까운 과제를 고르면, 관리자가 예산을 고려해 최대한 맞춰 배정합니다.</div></div>'
       + '</div><div class="d-flex justify-content-between align-items-center mt-3"><span class="small text-secondary" id="request-tier"></span><button type="submit" class="btn btn-primary"><i class="ti ti-send me-1"></i>요청 제출</button></div></form>'
       + '</div>'
       + '<div class="col-lg-5">'
@@ -495,9 +589,9 @@
       + mineHtml
       + '<h3 class="card-title mt-4 mb-2"><i class="ti ti-route me-1 text-primary"></i>처리 흐름</h3>'
       + '<div class="list-group list-group-flush">'
-      + step(1, '구매 심의 (필요 시)', '금액이 크거나 나눠 집행할 계획이면 먼저 <a href="#review" data-action="tab" data-tab="review">구매 심의</a>를 올려 과제에 가할당을 받습니다.')
-      + step(2, '구매 요청 제출', '품명·비목·수량·단가를 적어 제출합니다. 미처리 상태에서는 직접 수정·취소할 수 있습니다.')
-      + step(3, '관리자 배정', '관리자가 과제와 비목을 배정하면 <span class="badge bg-blue-lt">처리</span>로 바뀌고 해당 비목에서 실집행으로 차감됩니다.')
+      + step(1, '컨펌 받기', won(PROF_MIN) + ' 이하는 <strong>각 팀 중간관리자</strong>가 컨펌합니다(교수님 컨펌이 꼭 필요한 물품은 중간관리자가 판단해 교수님께 컨펌). ' + won(PROF_MIN) + ' 초과는 지금처럼 <strong>구매행정 시스템으로 교수님</strong>께 컨펌받습니다.')
+      + step(2, '구매 요청 제출', '사용 용도·구매 주기·팀·컨펌한 사람·가장 관련 있는 과제를 적어 제출합니다. 미처리 상태에서는 직접 수정·취소할 수 있습니다.')
+      + step(3, '관리자 과제 배정', '관리자가 2주마다 갱신되는 과제별 재료비·장비비·연구활동비 잔액을 보고 과제를 배정하면 <span class="badge bg-blue-lt">처리</span>로 바뀝니다. 고른 관련 과제에 최대한 맞춥니다.')
       + step(4, '구매 후 보고서', '물품이 오면 요청 조회의 <span class="badge bg-yellow-lt">보고서 미작성</span> 배지를 눌러 영수증·거래내역·검수 사진을 첨부하고 제출합니다. 50만원 초과는 검수 사진, 네이버페이는 주문 캡처가 필요합니다.')
       + step(5, '검수 승인', '포닥연구원 검수자(' + esc((CFG.report && CFG.report.inspectors || []).join(', ') || '지정 필요') + ')가 <span class="badge bg-blue-lt">검수 대기</span> 건을 열어 승인하면 검수자 칸에 서명이 들어가고 <span class="badge bg-green-lt">검수 완료</span>가 됩니다.')
       + '</div>'
@@ -582,8 +676,12 @@
     return '<div class="fw-medium">' + (r.kind === 'meeting' ? '<span class="badge bg-green-lt me-1">회의비</span>' : '') + esc(r.item)
       + (r.link ? ' <a href="' + esc(r.link) + '" target="_blank" rel="noopener" class="text-secondary" title="링크 열기"><i class="ti ti-external-link"></i></a>' : '') + '</div>'
       + '<div class="small text-secondary"><span class="badge badge-outline text-primary me-1">' + esc(catLabel(normCat(r.category))) + '</span>'
-      + (r.reviewId ? '<span class="badge bg-green-lt me-1" title="' + esc(rv ? rv.title : '') + '"><i class="ti ti-shield-check"></i> 심의</span>' : '') + esc(meetingSub || r.note || '')
-      + (sug && r.status === 'pending' ? '<span class="ms-1">· 청구 과제 ' + esc(sug.code || sug.name) + '</span>' : '') + '</div>'
+      + (r.reviewId ? '<span class="badge bg-green-lt me-1" title="' + esc(rv ? rv.title : '') + '"><i class="ti ti-shield-check"></i> 심의</span>' : '')
+      + (r.meta && r.meta.cycle ? '<span class="badge bg-secondary-lt me-1" title="구매 주기"><i class="ti ti-repeat me-1"></i>' + esc(r.meta.cycle) + '</span>' : '')
+      + confirmBadges(r) + esc(meetingSub || r.note || '')
+      + (r.kind === 'meeting'
+        ? (sug && r.status === 'pending' ? '<span class="ms-1">· 청구 과제 ' + esc(sug.code || sug.name) + '</span>' : '')
+        : (sug ? '<span class="ms-1">· 관련 과제 <span title="' + esc(sug.name) + '">' + esc(sug.alias || sug.name) + '</span></span>' : (r.meta && r.meta.relatedUnknown ? '<span class="ms-1">· 관련 과제 모름</span>' : ''))) + '</div>'
       + (r.status === 'rejected' && r.adminNote ? '<div class="small text-danger">반려 사유: ' + esc(r.adminNote) + '</div>' : '');
   }
 
@@ -620,16 +718,26 @@
       html += '<td><span class="badge ' + st.cls + '">' + st.label + '</span></td>'
         + '<td><div class="d-flex flex-wrap gap-1"><select class="form-select form-select-sm" data-role="assign-project">' + projectOptions(r.amount, pre.cat, pre.projectId) + '</select>'
         + '<select class="form-select form-select-sm" data-role="assign-cat" style="min-width:7rem">' + catOptions(pre.cat) + '</select></div>' + cardUsersHint(pre.projectId) + '</td>'
-        + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-primary" data-action="assign">처리</button> '
+        + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-primary" data-action="assign">승인</button> '
         + '<button type="button" class="btn btn-sm btn-outline-danger" data-action="reject">반려</button> '
         + '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="edit-request" title="수정"><i class="ti ti-edit"></i></button></td>';
     } else {
-      html += '<td><span class="badge ' + st.cls + '">' + st.label + '</span>'
+      var ps = BUD.purchaseState(r);
+      var cr = r.meta && r.meta.cancelRequest;
+      var mineOpen = own && r.kind !== 'meeting' && ps === 'provisional';
+      html += '<td>' + stateBadge(r)
         + (r.processedAt ? '<div class="small text-secondary text-nowrap">' + fmtDate(r.processedAt) + (r.processedBy ? ' · ' + esc(r.processedBy) : '') + '</div>' : '')
+        + (ps === 'confirmed' && r.meta && r.meta.purchase ? '<div class="small text-green text-nowrap">확정 ' + fmtDate(r.meta.purchase.confirmedAt) + '</div>' : '')
+        + (ps === 'cancelRequested' ? '<div class="small text-orange">반려 신청: ' + esc(cr.reason) + '</div>' : '')
+        + (cr && cr.status === 'denied' && ps === 'provisional' ? '<div class="small text-secondary">반려 신청 거절' + (cr.resolvedNote ? ': ' + esc(cr.resolvedNote) : '') + '</div>' : '')
         + (r.status === 'done' ? '<div class="mt-1">' + reportBadge(r) + '</div>' : '') + '</td>'
         + '<td>' + (p ? '<div>' + esc(p.name) + '</div><div class="small text-secondary">' + esc(p.code) + '</div>' : '<span class="text-secondary">-</span>') + '</td>'
         + '<td class="text-end text-nowrap">'
-        + (admin && r.status !== 'pending' ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="reopen" title="미처리로 되돌리기"><i class="ti ti-arrow-back-up"></i></button>' : '')
+        + (mineOpen ? '<a class="btn btn-sm btn-success" href="../report/index.html#id=' + esc(r.id) + '" title="보고서를 쓰고 구매를 확정합니다"><i class="ti ti-circle-check me-1"></i>보고서 · 구매 확정</a> '
+          + '<button type="button" class="btn btn-sm btn-outline-danger" data-action="cancel-request">반려 신청</button> ' : '')
+        + (admin && r.status === 'rejected' ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="reopen" title="미처리로 되돌리기"><i class="ti ti-arrow-back-up"></i></button>' : '')
+        + (admin && r.kind !== 'meeting' && (ps === 'provisional' || ps === 'cancelRequested') ? '<button type="button" class="btn btn-sm btn-outline-secondary" data-action="revoke-approval" title="승인을 취소하고 미처리로 되돌림"><i class="ti ti-arrow-back-up me-1"></i>승인 취소</button> ' : '')
+        + (admin && r.kind === 'meeting' && r.status === 'done' ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="reopen" title="미처리로 되돌리기"><i class="ti ti-arrow-back-up"></i></button>' : '')
         + (canEdit ? '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="edit-request" title="수정"><i class="ti ti-edit"></i></button>' : '')
         + (canEdit ? '<button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="delete-request" title="' + (own && !admin ? '요청 취소' : '삭제') + '"><i class="ti ti-trash"></i></button>' : '')
         + '</td>';
@@ -645,17 +753,41 @@
     return { projectId: sug, cat: normCat(r.category) };
   }
 
+  /* 배정 후보: 예산 관리 대상 과제만, 급한 순 */
   function projectOptions(amount, cat, selectedId) {
     var opts = '<option value="">과제 선택…</option>';
-    state.projects.filter(function (p) { return p.active !== false; }).forEach(function (p) {
-      var s = projectStats(p);
-      var remain = s.byCat[cat] ? s.byCat[cat].remain : s.remain;
+    var list = state.projects.filter(function (p) { return BUD.isManaged(p) || p.id === selectedId; }).map(function (p) { return { p: p, u: BUD.urgency(p) }; });
+    list.sort(function (a, b) { return a.u.rank - b.u.rank || (a.u.days === null ? 1e9 : a.u.days) - (b.u.days === null ? 1e9 : b.u.days); });
+    list.forEach(function (x) {
+      var p = x.p;
+      var remain = BUD.remainFor(p, cat, budgetCtx());
       var short = (Number(amount) || 0) > remain;
-      var label = p.name.length > 22 ? p.name.slice(0, 22) + '…' : p.name;
+      var label = (p.alias || p.name);
       opts += '<option value="' + esc(p.id) + '"' + (p.id === selectedId ? ' selected' : '') + ' title="' + esc(p.name) + '">'
-        + esc((p.code ? p.code + ' ' : '') + label) + ' · ' + esc(catLabel(cat)) + ' 잔액 ' + won(remain) + (short ? ' (부족)' : '') + '</option>';
+        + esc(label) + ' · ' + esc(BUD.isUnified(p) ? '통합' : catLabel(poolOf(cat))) + ' 잔액 ' + won(remain) + (x.u.days !== null && x.u.days >= 0 ? ' · D-' + x.u.days : '') + (short ? ' (부족)' : '') + '</option>';
     });
     return opts;
+  }
+
+  /* 배정 추천 3개: 잔액 충분 → 올해 소진 필요 → 종료일 → 요청자 참여 과제 (budget-core suggest) */
+  /* 요청자가 고른 관련 과제를 맨 위에(★), 그 아래 추천 3개 (관련 과제와 겹치면 빼고) */
+  function suggestHtml(r, cat) {
+    var relId = r.kind !== 'meeting' && r.meta && r.meta.suggestedProjectId;
+    var rel = relId && BUD.isManaged(projectById(relId)) ? projectById(relId) : null;
+    var list = BUD.suggest(r.amount, poolOf(cat), r.requesterName, state.projects, budgetCtx(), 4).filter(function (x) { return !rel || x.project.id !== rel.id; }).slice(0, 3);
+    if (rel) {
+      var rr = BUD.remainFor(rel, poolOf(cat), budgetCtx());
+      list.unshift({ project: rel, remain: rr, after: rr - (Number(r.amount) || 0), enough: rr >= (Number(r.amount) || 0) && rr > 0, urgency: BUD.urgency(rel), member: false, requested: true });
+    }
+    if (!list.length) return '<div class="small text-secondary mt-1" data-role="suggest">추천할 과제가 없습니다 (잔액 있는 과제 없음)</div>';
+    var n = 0;
+    return '<div class="mt-2 d-flex flex-column gap-1" data-role="suggest">' + list.map(function (x) {
+      var p = x.project, u = URG[x.urgency.level] || URG.later;
+      return '<button type="button" class="btn btn-sm btn-outline-' + (x.enough ? 'primary' : 'danger') + ' text-start justify-content-start" data-action="assign-pick" data-project="' + esc(p.id) + '" title="' + esc(p.name) + '">'
+        + '<span class="status-dot ' + u.dot.replace('bg-', 'status-') + ' me-2"></span><span class="fw-medium me-1">' + (x.requested ? '★ 요청자 관련 과제 · ' : (++n) + '. ') + esc(p.alias || p.name) + '</span>'
+        + '<span class="small tnum text-secondary">' + won(x.remain) + ' → <span class="' + (x.after < 0 ? 'text-danger' : '') + '">' + won(x.after) + '</span>'
+        + (x.urgency.days !== null ? ' · D-' + x.urgency.days : '') + ' · ' + esc(u.label) + (x.urgency.check && x.urgency.level !== 'check' ? ' · <span class="text-orange">집행 전 확인</span>' : '') + (x.member ? ' · 참여' : '') + '</span></button>';
+    }).join('') + '</div>';
   }
 
   /* ---------- 구매 심의 탭 ---------- */
@@ -801,66 +933,274 @@
     });
   }
 
-  /* ---------- 과제 예산 탭 (관리자) ---------- */
-  function stackedBar(actualRatio, provRatio, warnRatio) {
-    var a = Math.min(100, Math.round(actualRatio * 100));
-    var p = Math.min(100 - a, Math.round(provRatio * 100));
-    var cls = barClass(warnRatio);
-    return '<div class="progress progress-sm"><div class="progress-bar ' + cls + '" style="width:' + a + '%" title="실집행"></div>'
-      + '<div class="progress-bar ' + cls + ' opacity-50" style="width:' + p + '%" title="가할당"></div></div>';
+  /* ---------- 과제 예산 대시보드 (관리자) ---------- */
+  function poolShort(id) { return { equipment: '장비비', material: '재료비', activity: '활동비' }[id] || catLabel(id); }
+  function dday(days) { return days === null ? '-' : days < 0 ? '종료' : 'D-' + days; }
+  function managedBudgetProjects() {
+    return state.projects.filter(function (p) { return BUD.isManaged(p) && (BUD.base(p) || CAT_IDS.some(function (c) { return budgetOf(p, c) > 0; })); });
+  }
+  function urgencyOf(p) { return BUD.urgency(p); }
+  function urgBadge(u) {
+    var s = URG[u.level] || URG.later;
+    return '<span class="badge ' + s.cls + '">' + esc(s.label) + '</span>' + (u.check && u.level !== 'check' ? '<div class="mt-1"><span class="badge bg-orange-lt">집행 전 확인</span></div>' : '');
   }
 
-  function renderBudgetTab() {
-    var admin = isAdminActive();
-    if (!admin && !isOwnerAnywhere()) {
-      return { body: '<div class="card-body">' + empty('lock', '과제 예산은 관리자와 과제 담당자만 볼 수 있습니다', '담당 과제로 지정되면 여기에서 그 과제 예산을 볼 수 있습니다. 관리자는 PIN을 입력하면 ' + unlockMinutes() + '분 동안 전체가 열립니다.')
-        + (isAdminEligible() ? '<div class="text-center"><button type="button" class="btn btn-primary" data-action="unlock-budget"><i class="ti ti-key me-1"></i>PIN 입력</button></div>' : '') + '</div>' };
-    }
-    var list = visibleBudgetProjects();
-    if (!list.length) return { body: '<div class="card-body">' + empty('folder-off', admin ? '등록된 과제가 없습니다' : '담당으로 지정된 과제가 없습니다', admin ? '관리자 탭에서 과제를 추가하세요.' : '관리자에게 과제 담당자 지정을 요청하세요.') + '</div>' };
-    var legend = '<div class="card-body py-2 border-bottom small text-secondary d-flex flex-wrap gap-3 align-items-center">'
-      + (admin ? '' : '<span class="badge bg-blue-lt">내 담당 과제 ' + list.length + '개</span>')
-      + '<span><span class="badge bg-primary me-1">&nbsp;</span>실집행 (처리된 구매건)</span><span><span class="badge bg-primary opacity-50 me-1">&nbsp;</span>가할당 (승인된 심의의 미집행분)</span><span>잔액 = 예산 − 실집행 − 가할당</span></div>';
-    var cards = '';
-    list.sort(function (a, b) { return (a.active === false) - (b.active === false); }).forEach(function (p) {
+  /* 올해 소진 필요(이월불가·종료 표시 과제)의 남은 잔액 */
+  function mustSpendSummary() {
+    var out = { total: 0, count: 0 };
+    managedBudgetProjects().forEach(function (p) {
+      if (urgencyOf(p).level !== 'must') return;
       var s = projectStats(p);
-      var items = state.requests.filter(function (r) { return r.status === 'done' && r.projectId === p.id; });
-      var rvs = state.reviews.filter(function (rv) { return rv.status === 'approved' && rv.projectId === p.id && reviewProvisional(rv) > 0; });
-      var catRows = '';
-      CAT_IDS.forEach(function (c) {
-        var b = s.byCat[c];
-        if (b.budget <= 0 && b.committed <= 0) return;
-        catRows += '<div class="cat-row"><div class="d-flex flex-wrap justify-content-between small mb-1 gap-1"><span class="text-nowrap">' + esc(catLabel(c)) + '</span>'
-          + '<span class="tnum text-nowrap ms-auto"><span class="fw-medium">실 ' + won(b.actual) + '</span>' + (b.provisional ? ' <span class="text-secondary">· 가 ' + won(b.provisional) + '</span>' : '') + '<span class="text-secondary"> / ' + won(b.budget) + '</span></span></div>'
-          + '<div class="progress progress-xs"><div class="progress-bar ' + barClass(b.ratio) + '" style="width:' + Math.min(100, Math.round(b.actualRatio * 100)) + '%"></div>'
-          + '<div class="progress-bar ' + barClass(b.ratio) + ' opacity-50" style="width:' + Math.min(100 - Math.min(100, Math.round(b.actualRatio * 100)), Math.round((b.ratio - b.actualRatio) * 100)) + '%"></div></div></div>';
-      });
-      cards += '<div class="col-md-6 col-xl-4"><div class="card' + (p.active === false ? ' card-soon' : '') + '">'
-        + '<div class="card-status-top ' + (p.active === false ? 'bg-secondary' : barClass(s.ratio)) + '"></div>'
-        + '<div class="card-body">'
-        + '<div class="d-flex justify-content-between align-items-start gap-2 mb-3"><div><h3 class="card-title mb-1">' + esc(p.name) + '</h3>'
-        + '<div class="text-secondary small">' + esc(p.code) + (p.manager ? ' · ' + esc(p.manager) : '') + '<br>' + esc(p.startDate || '-') + ' ~ ' + esc(p.endDate || '-')
-        + (p.owners && p.owners.length ? '<br><i class="ti ti-user-star me-1"></i>담당 ' + esc(p.owners.join(', ')) : '') + '</div></div>'
-        + '<div class="text-end">' + (p.active === false ? '<span class="badge bg-secondary-lt">종료</span>' : '<span class="badge bg-blue-lt">진행</span>')
-        + (isProjectOwner(p) ? '<div class="mt-1"><span class="badge bg-green-lt">내 담당</span></div>' : '') + '</div></div>'
-        + '<div class="d-flex justify-content-between align-items-baseline mb-1"><span class="text-secondary small">총 예산 <span class="tnum">' + won(s.total) + '</span></span>'
-        + '<span class="tnum' + (s.remain < 0 ? ' text-danger' : '') + '">잔액 <strong>' + won(s.remain) + '</strong></span></div>'
-        + stackedBar(s.actualRatio, s.ratio - s.actualRatio, s.ratio)
-        + '<div class="d-flex justify-content-between small text-secondary mt-1 mb-3"><span>실집행 <span class="tnum">' + won(s.actual) + '</span></span><span>가할당 <span class="tnum">' + won(s.provisional) + '</span></span></div>'
-        + catRows
-        + (p.note ? '<div class="text-secondary small mt-3"><i class="ti ti-note me-1"></i>' + esc(p.note) + '</div>' : '')
-        + '<details class="mt-3"><summary class="text-primary small">배정된 구매건 ' + items.length + '건 · 가할당 심의 ' + rvs.length + '건</summary>'
-        + (items.length ? '<ul class="list-unstyled small mt-2 mb-0">' + items.map(function (r) {
-          return '<li class="d-flex justify-content-between gap-2 py-1 border-top"><span>' + fmtDate(r.processedAt || r.createdAt) + ' ' + esc(r.item) + ' <span class="text-secondary">(' + esc(r.requesterName) + ' · ' + esc(catLabel(normCat(r.category))) + ')</span></span><span class="tnum text-nowrap">' + won(r.amount) + '</span></li>';
-        }).join('') + '</ul>' : '')
-        + (rvs.length ? '<ul class="list-unstyled small mt-2 mb-0">' + rvs.map(function (rv) {
-          return '<li class="d-flex justify-content-between gap-2 py-1 border-top"><span><i class="ti ti-shield-check text-green"></i> ' + esc(rv.title) + ' <span class="text-secondary">(' + esc(rv.requesterName) + ' · ' + esc(catLabel(normCat(rv.category))) + ')</span></span><span class="tnum text-nowrap text-secondary">가 ' + won(reviewProvisional(rv)) + '</span></li>';
-        }).join('') + '</ul>' : '')
-        + (!items.length && !rvs.length ? '<div class="text-secondary small mt-2">아직 없음</div>' : '')
-        + '</details>'
-        + '</div></div></div>';
+      out.total += Math.max(0, s.remain); out.count++;
     });
-    return { body: legend + '<div class="card-body"><div class="row row-cards">' + cards + '</div></div>' };
+    return out;
+  }
+  /* 올해 12/31 까지 끝나는 과제의 세목별 잔액과 월 집행 필요액 */
+  function yearEndSummary() {
+    var today = BUD.localDate(new Date().toISOString());
+    var yearEnd = today.slice(0, 4) + '-12-31';
+    var pools = {}; BUD.POOL_IDS.forEach(function (id) { pools[id] = 0; });
+    var unified = 0, count = 0;
+    managedBudgetProjects().forEach(function (p) {
+      if (!p.endDate || p.endDate > yearEnd || p.endDate < today || urgencyOf(p).level === 'check') return;
+      var s = projectStats(p); count++;
+      if (s.unified) unified += Math.max(0, s.pools.unified.remain);
+      else BUD.POOL_IDS.forEach(function (id) { pools[id] += Math.max(0, s.pools[id].remain); });
+    });
+    var months = Math.max(1, Math.ceil(BUD.dayDiff(today, yearEnd) / 30.4));
+    return { pools: pools, unified: unified, count: count, months: months, yearEnd: yearEnd };
+  }
+  /* 기준일 직전 며칠 동안 처리한 건: 행정 잔액에 반영됐는지 확인 대상 */
+  function recentBeforeBase() {
+    var days = Number(CFG.budget && CFG.budget.recentCheckDays) || 7;
+    return state.requests.filter(function (r) {
+      var p = r.status === 'done' ? projectById(r.projectId) : null;
+      var b = p && BUD.base(p);
+      if (!b) return false;
+      var d = localDate(r.processedAt || r.createdAt);
+      return d <= b.date && BUD.dayDiff(d, b.date) < days;
+    });
+  }
+
+  function poolCell(s, id) {
+    var b = s.pools[id];
+    if (!b || (b.budget === 0 && b.actual === 0 && b.provisional === 0)) return '<td class="text-end text-secondary">-</td>';
+    var used = b.actual + b.provisional;
+    return '<td class="text-end tnum text-nowrap"><div class="fw-medium' + (b.remain < 0 ? ' text-danger' : '') + '">' + won(b.remain) + '</div>'
+      + (used ? '<div class="small text-secondary">기준 ' + won(b.budget) + (b.actual ? ' − 확정 ' + won(b.actual) : '') + (b.provisional ? ' − 가처리 ' + won(b.provisional) : '') + '</div>' : '') + '</td>';
+  }
+
+  function renderBudgetDashboard() {
+    var fr = BUD.freshness(state.projects);
+    var upload = '<label class="btn btn-sm btn-primary mb-0"><i class="ti ti-file-spreadsheet me-1"></i>연구비 현황 엑셀 올리기<input type="file" accept=".xlsx,.xls" data-action="import-budget" hidden></label>';
+    var head = '<div class="card-body py-2 border-bottom d-flex flex-wrap gap-2 align-items-center">'
+      + (fr ? '<div class="small"><i class="ti ti-calendar-stats me-1 text-primary"></i>행정 현황 기준일 <strong>' + esc(fr.date.replace(/-/g, '.')) + '</strong> <span class="text-secondary">· ' + fr.age + '일 전 · ' + esc(fr.source) + (fr.importedBy ? ' · ' + esc(fr.importedBy) + ' 올림' : '') + '</span></div>' : '<div class="small text-secondary">아직 행정 연구비 현황을 올리지 않았습니다.</div>')
+      + '<div class="ms-auto d-flex gap-2 flex-wrap"><button type="button" class="btn btn-sm" data-action="export-purchase-log"><i class="ti ti-download me-1"></i>구매기록 내보내기</button>' + upload + '</div></div>';
+    if (fr && fr.stale) head += '<div class="alert alert-warning m-3 mb-0"><i class="ti ti-alert-triangle me-1"></i>기준일로부터 ' + fr.age + '일이 지났습니다. 행정 현황은 ' + fr.refreshDays + '일마다 갱신하기로 했으니 새 현황 엑셀을 올려 주세요. 그 사이 행정에서 처리된 건이 잔액에 빠져 있을 수 있습니다.</div>';
+    if (!fr) head += '<div class="alert alert-info m-3 mb-0"><i class="ti ti-info-circle me-1"></i>행정 연구비 현황 엑셀(학생공유_연구비 시트)을 올리면 과제별 잔액·기한이 채워집니다. 파일은 서버로 보내지 않고 이 브라우저에서만 읽어 저장합니다.</div>';
+
+    var list = managedBudgetProjects();
+    if (!list.length) return { body: head + '<div class="card-body">' + empty('folder-off', '예산이 있는 과제가 없습니다', '연구비 현황 엑셀을 올리거나 아래 과제 추가에서 직접 입력하세요.') + '</div>' };
+
+    /* 올해 말까지 써야 하는 돈 */
+    var ye = yearEndSummary();
+    var ms = mustSpendSummary();
+    var yeTotal = BUD.POOL_IDS.reduce(function (s, id) { return s + ye.pools[id]; }, 0) + ye.unified;
+    var top = '<div class="card-body border-bottom"><div class="row g-3">'
+      + '<div class="col-lg-7"><div class="subheader mb-2">' + esc(ye.yearEnd.slice(0, 4)) + '년 12월 31일까지 종료되는 과제 ' + ye.count + '개 · 남은 기간 약 ' + ye.months + '개월</div>'
+      + '<table class="table table-sm mb-0"><thead><tr><th>세목</th><th class="text-end">남은 잔액</th><th class="text-end">월 집행 필요</th></tr></thead><tbody>'
+      + BUD.POOLS.map(function (c) { var v = ye.pools[c.id]; return v > 0 ? '<tr><td>' + esc(c.label) + '</td><td class="text-end tnum fw-medium">' + won(v) + '</td><td class="text-end tnum">' + won(v / ye.months) + '</td></tr>' : ''; }).join('')
+      + (ye.unified > 0 ? '<tr><td>통합 잔액</td><td class="text-end tnum fw-medium">' + won(ye.unified) + '</td><td class="text-end tnum">' + won(ye.unified / ye.months) + '</td></tr>' : '')
+      + '<tr class="fw-bold"><td>합계</td><td class="text-end tnum">' + won(yeTotal) + '</td><td class="text-end tnum">' + won(yeTotal / ye.months) + '</td></tr></tbody></table></div>'
+      + '<div class="col-lg-5"><div class="card card-sm bg-red-lt h-100"><div class="card-body"><div class="subheader">이월불가·종료 (올해 소진·정산 필요)</div><div class="h1 tnum mb-1">' + won(ms.total) + '</div>'
+      + '<div class="small">' + list.filter(function (p) { return urgencyOf(p).level === 'must'; }).map(function (p) { return esc(p.alias || p.name) + ' ' + won(Math.max(0, projectStats(p).remain)); }).join('<br>') + '</div></div></div></div>'
+      + '</div></div>';
+
+    var recent = recentBeforeBase();
+    var recentHtml = recent.length ? '<div class="card-body py-2 border-bottom"><details><summary class="small text-orange"><i class="ti ti-alert-circle me-1"></i>기준일 직전에 처리한 ' + recent.length + '건은 행정 잔액에 반영된 것으로 계산했습니다. 반영 여부를 확인하세요.</summary>'
+      + '<ul class="list-unstyled small mt-2 mb-0">' + recent.map(function (r) { var p = projectById(r.projectId); return '<li class="py-1 border-top d-flex justify-content-between gap-2"><span>' + fmtDate(r.processedAt) + ' ' + esc(r.item) + ' <span class="text-secondary">(' + esc(r.requesterName) + ' · ' + esc(p ? (p.alias || p.name) : '') + ' · ' + esc(catLabel(poolOf(r.category))) + ')</span></span><span class="tnum">' + won(r.amount) + '</span></li>'; }).join('') + '</ul></details></div>' : '';
+
+    /* 과제 표: 긴급도 → 종료일 순 (또는 잔액 순) */
+    var rows = list.map(function (p) { return { p: p, s: projectStats(p), u: urgencyOf(p) }; });
+    rows.sort(state.budgetSort === 'remain'
+      ? function (a, b) { return b.s.remain - a.s.remain; }
+      : function (a, b) { return a.u.rank - b.u.rank || (a.u.days === null ? 1e9 : a.u.days) - (b.u.days === null ? 1e9 : b.u.days) || b.s.remain - a.s.remain; });
+    var tot = { remain: 0 }; BUD.POOL_IDS.forEach(function (id) { tot[id] = 0; }); tot.unified = 0;
+    var sortBtns = '<div class="btn-group btn-group-sm">' + [['urgency', '급한 순'], ['remain', '잔액 순']].map(function (x) { return '<button type="button" class="btn ' + (state.budgetSort === x[0] ? 'btn-primary' : 'btn-outline-secondary') + '" data-action="budget-sort" data-sort="' + x[0] + '">' + x[1] + '</button>'; }).join('') + '</div>';
+    var table = '<div class="card-body py-2 border-bottom d-flex justify-content-between align-items-center flex-wrap gap-2"><div class="small text-secondary">잔액 = 행정 기준 잔액 − 기준일 이후 구매 확정 − 가처리(승인 후 구매 확정 전) − 가할당(승인된 구매 심의 중 미집행)</div>' + sortBtns + '</div>'
+      + '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th class="w-1"></th><th>과제</th><th class="w-1">종료</th>'
+      + BUD.POOLS.map(function (c) { return '<th class="text-end">' + esc(c.label) + '</th>'; }).join('') + '<th class="text-end">합계</th></tr></thead><tbody>'
+      + rows.map(function (x) {
+        var p = x.p, s = x.s, b = BUD.base(p) || {};
+        var post = state.requests.filter(function (r) { return r.status === 'done' && r.projectId === p.id && (!b.date || localDate(r.processedAt || r.createdAt) > b.date); });
+        if (s.unified) tot.unified += s.pools.unified.remain; else BUD.POOL_IDS.forEach(function (id) { tot[id] += s.pools[id].remain; });
+        tot.remain += s.remain;
+        var cells = s.unified
+          ? '<td colspan="' + BUD.POOLS.length + '" class="text-center tnum"><span class="fw-medium' + (s.remain < 0 ? ' text-danger' : '') + '">' + won(s.remain) + '</span> <span class="small text-secondary">통합 잔액 (세목 구분 없음)' + (s.actual ? ' · 기준 ' + won(s.budget) + ' − 집행 ' + won(s.actual) : '') + '</span></td>'
+          : BUD.POOL_IDS.map(function (id) { return poolCell(s, id); }).join('');
+        return '<tr><td>' + urgBadge(x.u) + '</td>'
+          + '<td><div class="fw-medium">' + esc(p.alias || p.name) + '</div><div class="small text-secondary text-truncate" style="max-width:24rem" title="' + esc(p.name) + '">' + esc(p.name) + '</div>'
+          + (b.status || b.note ? '<div class="small">' + (b.status ? '<span class="text-body">' + esc(b.status) + '</span>' : '') + (b.note ? ' <span class="text-secondary">· ' + esc(b.note) + '</span>' : '') + '</div>' : '')
+          + (post.length ? '<details class="small"><summary class="text-primary">기준일 이후 집행 ' + post.length + '건</summary><ul class="list-unstyled mb-0">' + post.map(function (r) { return '<li class="d-flex justify-content-between gap-2 border-top py-1"><span>' + fmtDate(r.processedAt) + ' ' + esc(r.item) + ' <span class="text-secondary">(' + esc(r.requesterName) + ' · ' + esc(catLabel(poolOf(r.category))) + ')</span></span><span class="tnum">' + won(r.amount) + '</span></li>'; }).join('') + '</ul></details>' : '') + '</td>'
+          + '<td class="text-nowrap small">' + esc((p.endDate || '-').replace(/-/g, '.').slice(2)) + '<div class="' + (x.u.days !== null && x.u.days <= 100 ? 'text-red fw-medium' : 'text-secondary') + '">' + dday(x.u.days) + '</div></td>'
+          + cells + '<td class="text-end tnum fw-bold text-nowrap' + (s.remain < 0 ? ' text-danger' : '') + '">' + won(s.remain) + '</td></tr>';
+      }).join('')
+      + '<tr class="fw-bold"><td></td><td>합계' + (tot.unified ? ' <span class="small fw-normal text-secondary">(통합 잔액 ' + won(tot.unified) + ' 별도)</span>' : '') + '</td><td></td>' + BUD.POOL_IDS.map(function (id) { return '<td class="text-end tnum">' + won(tot[id]) + '</td>'; }).join('') + '<td class="text-end tnum">' + won(tot.remain) + '</td></tr>'
+      + '</tbody></table></div>';
+    var exNames = (CFG.budget && CFG.budget.excludeAliases) || [];
+    var foot = '<div class="card-body py-2 small text-secondary border-top"><i class="ti ti-eye-off me-1"></i>예산 관리·배정 제외: ' + (exNames.length ? exNames.map(esc).join(', ') : '없음') + ' <span class="text-secondary">(config.js budget.excludeAliases)</span></div>';
+    return { body: head + top + recentHtml + table + foot };
+  }
+
+  /* ---------- 행정 연구비 현황 엑셀 가져오기 (브라우저에서만 읽음) ---------- */
+  function cellNum(v) { if (typeof v === 'number') return v; var n = Number(String(v || '').replace(/[,\s원]/g, '')); return isNaN(n) ? 0 : n; }
+  function ymdFrom(y, m, d) { y = Number(y); if (y < 100) y += 2000; return y + '-' + pad2(m) + '-' + pad2(d); }
+  function parsePeriod(s) {
+    var m = String(s || '').match(/(\d{2,4})\.(\d{1,2})\.(\d{1,2})\s*~\s*(\d{2,4})\.(\d{1,2})\.(\d{1,2})/);
+    return m ? { start: ymdFrom(m[1], m[2], m[3]), end: ymdFrom(m[4], m[5], m[6]) } : null;
+  }
+  function parseBudgetWorkbook(buf, fileName) {
+    if (!window.XLSX) throw new Error('엑셀 읽기 도구를 불러오지 못했습니다. 인터넷 연결을 확인하고 새로고침하세요.');
+    var wb = window.XLSX.read(buf, { type: 'array' });
+    var found = null;
+    wb.SheetNames.some(function (sn) {
+      var rows = window.XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: '' });
+      for (var i = 0; i < Math.min(rows.length, 40); i++) {
+        var r = rows[i].map(function (c) { return String(c).trim(); });
+        if (r.indexOf('과제명') >= 0 && r.indexOf('구분') >= 0) { found = { sheet: sn, rows: rows, head: i }; return true; }
+      }
+      return false;
+    });
+    if (!found) throw new Error('과제명·구분 머리글이 있는 시트를 찾지 못했습니다. 행정 연구비 현황 양식인지 확인하세요.');
+    var head = found.rows[found.head].map(function (c) { return String(c).replace(/\s+/g, ''); });
+    function col(re) { for (var i = 0; i < head.length; i++) if (re.test(head[i])) return i; return -1; }
+    var C = { name: col(/^과제명$/), key: col(/^구분$/), period: col(/기한|기간/), unified: col(/현재잔액/), equipment: col(/장비/), material: col(/재료/), activity: col(/활동/), status: col(/집행/), note: col(/비고/) };
+    if (C.material < 0 || C.activity < 0) throw new Error('연구재료비·연구활동비 열을 찾지 못했습니다.');
+    /* 기준일: 위쪽 안내 문구의 날짜 → 파일명 yymmdd → 오늘 */
+    var date = '';
+    found.rows.slice(0, found.head).some(function (r) { var m = r.join(' ').match(/(20\d{2})[-.](\d{1,2})[-.](\d{1,2})/); if (m) { date = ymdFrom(m[1], m[2], m[3]); return true; } return false; });
+    if (!date) { var fm = String(fileName || '').match(/(\d{2})(\d{2})(\d{2})(?!\d)/); if (fm) date = ymdFrom(fm[1], fm[2], fm[3]); }
+    if (!date) date = localDate(new Date().toISOString());
+    var out = [];
+    for (var i = found.head + 1; i < found.rows.length; i++) {
+      var r = found.rows[i];
+      var name = String(r[C.name] || '').trim();
+      if (!name) { if (out.length) break; continue; }
+      var key = String(r[C.key] || '').trim();
+      var per = C.period >= 0 ? parsePeriod(r[C.period]) : null;
+      var eq = C.equipment >= 0 ? cellNum(r[C.equipment]) : 0, mat = cellNum(r[C.material]), act = cellNum(r[C.activity]);
+      var uni = C.unified >= 0 ? cellNum(r[C.unified]) : 0;
+      var status = C.status >= 0 ? String(r[C.status] || '').trim() : '', note = C.note >= 0 ? String(r[C.note] || '').trim() : '';
+      out.push({ name: name, key: key, alias: (CFG.budget && CFG.budget.aliasMap && CFG.budget.aliasMap[key]) || key,
+        start: per ? per.start : '', end: per ? per.end : '', periodText: C.period >= 0 ? String(r[C.period] || '') : '', open: !!per,
+        equipment: eq, material: mat, activity: act, unified: (eq + mat + act === 0 && uni > 0) ? uni : null,
+        status: status, note: note, mustSpend: /소진/.test(status), checkFirst: !per || /확인/.test(status + ' ' + note), excluded: BUD.excludedName(key) || BUD.excludedName(name) });
+    }
+    if (!out.length) throw new Error('과제 행을 찾지 못했습니다.');
+    return { sheet: found.sheet, date: date, rows: out };
+  }
+  function matchProject(row) {
+    var k = BUD.cfg && row.alias;
+    var key = String(k || '').replace(/\s+/g, '').toLowerCase();
+    var nm = row.name.replace(/\s+/g, '').toLowerCase();
+    return state.projects.filter(function (p) {
+      return (p.alias && String(p.alias).replace(/\s+/g, '').toLowerCase() === key) || String(p.name).replace(/\s+/g, '').toLowerCase() === nm;
+    })[0] || null;
+  }
+  function importBudgetFile(file) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var parsed;
+      try { parsed = parseBudgetWorkbook(new Uint8Array(reader.result), file.name); } catch (err) { handleError(err); return; }
+      var cur = BUD.freshness(state.projects);
+      var html = '<div class="mb-3"><label class="form-label required">행정 현황 기준일</label><input type="date" class="form-control" name="date" value="' + esc(parsed.date) + '">'
+        + '<div class="form-hint">이 날짜 이후에 포털에서 처리한 건만 잔액에서 뺍니다. 엑셀 위쪽 안내 문구나 파일명에서 읽었습니다.</div>'
+        + (cur && parsed.date < cur.date ? '<div class="text-danger small mt-1">지금 기준일(' + esc(cur.date) + ')보다 이전 날짜입니다.</div>' : '') + '</div>'
+        + '<div class="table-responsive"><table class="table table-sm table-vcenter"><thead><tr><th>구분</th><th>연결</th><th>기간</th><th class="text-end">장비비</th><th class="text-end">재료비</th><th class="text-end">활동비</th><th>집행 상태</th></tr></thead><tbody>'
+        + parsed.rows.map(function (r) {
+          var m = r.excluded ? null : matchProject(r);
+          return '<tr' + (r.excluded ? ' class="text-secondary"' : '') + '><td class="text-nowrap fw-medium">' + esc(r.key) + '</td>'
+            + '<td class="small">' + (r.excluded ? '<span class="badge bg-secondary-lt">제외</span>' : m ? '<span class="badge bg-green-lt">' + esc(m.alias || m.name) + '</span>' : '<span class="badge bg-blue-lt">새 과제</span>') + '</td>'
+            + '<td class="small text-nowrap">' + esc(r.open ? r.start.slice(2).replace(/-/g, '.') + '~' + r.end.slice(2).replace(/-/g, '.') : r.periodText || '-') + '</td>'
+            + (r.unified !== null ? '<td colspan="3" class="text-center tnum small">통합 ' + won(r.unified) + '</td>' : '<td class="text-end tnum small">' + (r.equipment ? nf.format(r.equipment) : '-') + '</td><td class="text-end tnum small">' + (r.material ? nf.format(r.material) : '-') + '</td><td class="text-end tnum small">' + (r.activity ? nf.format(r.activity) : '-') + '</td>')
+            + '<td class="small">' + esc(r.status) + '</td></tr>';
+        }).join('') + '</tbody></table></div>'
+        + '<div class="small text-secondary">새 과제는 엑셀 구분을 약칭으로 만듭니다. 제외 과제는 가져오지 않습니다. 과제명·기간·세목 잔액·집행 상태가 갱신되고 과제번호·참여자 등은 그대로 둡니다.</div>';
+      dialog({ title: '연구비 현황 가져오기 · ' + file.name, bodyHtml: html, size: 'lg', okLabel: '적용' }).then(function (v) {
+        if (!v) return;
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(v.date || '')) { toast('기준일을 입력하세요.', true); return; }
+        var now = new Date().toISOString();
+        var by = state.session ? state.session.user.name : '';
+        var jobs = parsed.rows.filter(function (r) { return !r.excluded; }).map(function (r) {
+          var p = matchProject(r);
+          var budgets = {}; CAT_IDS.forEach(function (c) { budgets[c] = 0; });
+          budgets.equipment = Math.round(r.equipment); budgets.material = Math.round(r.material); budgets.activity = Math.round(r.activity);
+          var rec = Object.assign({}, p || { code: '', manager: '', note: '', participants: [], cardUsers: [], owners: [] }, {
+            name: r.name, alias: p && p.alias ? p.alias : r.alias, startDate: r.start || (p ? p.startDate : ''), endDate: r.end || (p ? p.endDate : ''), budgets: budgets, active: true,
+            budgetBase: { date: v.date, source: file.name, importedAt: now, importedBy: by, unified: r.unified, status: r.status, note: r.note, mustSpend: r.mustSpend, checkFirst: r.checkFirst, open: r.open, period: r.periodText }
+          });
+          return rec;
+        });
+        var seen = jobs.map(function (j) { return j.id; });
+        var dropped = state.projects.filter(function (p) { return BUD.base(p) && seen.indexOf(p.id) < 0 && !BUD.isExcluded(p); });
+        return jobs.reduce(function (pr, rec) { return pr.then(function () { return store.saveProject(rec); }); }, Promise.resolve()).then(function () {
+          toast('연구비 현황을 적용했습니다: ' + jobs.length + '개 과제 · 기준일 ' + v.date + (dropped.length ? ' · 새 현황에 없는 과제 ' + dropped.map(function (p) { return p.alias || p.name; }).join(', ') : ''));
+          touchUnlock(); return refresh();
+        });
+      }).catch(handleError);
+    };
+    reader.onerror = function () { toast('파일을 읽지 못했습니다.', true); };
+    reader.readAsArrayBuffer(file);
+  }
+
+  /* ---------- 구매기록 내보내기: 연구비 엑셀 '구매기록' 시트와 같은 열 ---------- */
+  /* ---------- 구매 이력 탭: 구매 확정 때 자동으로 쌓이는 시트 (삭제는 관리자 삭제 버튼으로만) ---------- */
+  function renderHistoryTab() {
+    var admin = isAdminActive();
+    var q = state.historyQ.trim().toLowerCase();
+    var list = state.history.filter(function (h) {
+      return !q || [h.item, h.detail, h.requesterName, h.projectName, h.team, h.confirmer].join(' ').toLowerCase().indexOf(q) >= 0;
+    });
+    var total = list.reduce(function (s, h) { return s + (Number(h.amount) || 0); }, 0);
+    var body = '<div class="card-body py-2 border-bottom d-flex flex-wrap gap-2 align-items-center">'
+      + '<div class="small text-secondary me-auto"><i class="ti ti-info-circle me-1"></i>구매자가 <strong>구매 확정</strong>을 누르면 자동으로 한 줄씩 저장됩니다. 요청을 지워도 남고, 관리자가 삭제 버튼을 눌러야만 지워집니다.</div>'
+      + '<input type="search" class="form-control form-control-sm w-auto" data-role="history-q" placeholder="품명·이름·과제 검색" value="' + esc(state.historyQ) + '">'
+      + '<button type="button" class="btn btn-sm" data-action="export-history"><i class="ti ti-file-spreadsheet me-1"></i>엑셀로 받기</button></div>';
+    if (!list.length) return { body: body + '<div class="card-body">' + empty('history-off', state.history.length ? '검색 결과가 없습니다' : '아직 구매 확정된 이력이 없습니다', state.history.length ? '' : '승인된 구매 요청에서 보고서를 쓰고 구매 확정을 누르면 여기에 쌓입니다.') + '</div>' };
+    body += '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th class="w-1">확정일</th><th class="w-1">이름</th><th>구매품목</th><th class="text-end">가격</th><th>할당과제</th><th>팀 · 컨펌</th>' + (admin ? '<th class="w-1"></th>' : '') + '</tr></thead><tbody>'
+      + list.map(function (h) {
+        return '<tr><td class="text-nowrap text-secondary">' + fmtDate(h.confirmedAt) + '</td><td class="text-nowrap">' + esc(h.requesterName) + '</td>'
+          + '<td><div class="fw-medium">' + esc(h.item) + (h.link ? ' <a href="' + esc(h.link) + '" target="_blank" rel="noopener" class="text-secondary" title="구매처"><i class="ti ti-external-link"></i></a>' : '') + '</div>'
+          + '<div class="small text-secondary">' + esc(catLabel(poolOf(h.category))) + (h.cycle ? ' · ' + esc(h.cycle) : '') + (h.history ? ' · ' + (h.history === 'repeat' ? '재구매' : '신규') : '') + (h.detail ? ' · ' + esc(h.detail) : '') + '</div></td>'
+          + '<td class="text-end tnum text-nowrap">' + won(h.amount) + '</td><td>' + esc(h.projectName || '-') + '</td>'
+          + '<td class="small text-nowrap">' + esc(h.team || '-') + (h.confirmer ? '<div class="text-secondary">' + esc(h.confirmer) + ' 컨펌</div>' : '') + '</td>'
+          + (admin ? '<td><button type="button" class="btn btn-sm btn-ghost-danger btn-icon" data-action="delete-history" data-history="' + esc(h.id) + '" title="이력 삭제"><i class="ti ti-trash"></i></button></td>' : '') + '</tr>';
+      }).join('')
+      + '<tr class="fw-bold"><td colspan="3">합계 ' + list.length + '건</td><td class="text-end tnum">' + won(total) + '</td><td colspan="' + (admin ? 3 : 2) + '"></td></tr></tbody></table></div>';
+    return { body: body };
+  }
+
+  /* 구매 이력 시트(구매 확정 건) → 연구비 엑셀 '구매기록' 시트 열 순서 + 추가 정보 */
+  var HISTORY_HEAD = ['날짜', '이름', '구매품목', '구매상세정보', '가격 (VAT포함)', '할당과제', '세목', '구매주기', '신규/재구매', '팀', '컨펌', '구매처 링크', '승인일', '구매 확정일'];
+  function historyRow(h) {
+    return [localDate(h.requestedAt || h.confirmedAt).replace(/-/g, '').slice(2), h.requesterName, h.item, h.detail || (h.item + ', ' + (h.qty || 1) + 'EA'), Number(h.amount) || 0,
+      h.projectName, catLabel(poolOf(h.category)), h.cycle, h.history === 'repeat' ? '재구매' : h.history === 'new' ? '신규' : '', h.team, h.confirmer, h.link, localDate(h.approvedAt), localDate(h.confirmedAt)];
+  }
+  function exportPurchaseLog() {
+    var list = state.history.slice().sort(function (a, b) { return String(a.confirmedAt).localeCompare(String(b.confirmedAt)); });
+    if (!list.length) { toast('구매 확정된 이력이 없습니다.', true); return; }
+    var head = HISTORY_HEAD;
+    var rows = list.map(historyRow);
+    var name = 'DSIL_구매기록_' + localDate(new Date().toISOString()).replace(/-/g, '').slice(2);
+    if (window.XLSX) {
+      var ws = window.XLSX.utils.aoa_to_sheet([head].concat(rows));
+      ws['!cols'] = [{ wch: 8 }, { wch: 8 }, { wch: 24 }, { wch: 40 }, { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 10 }, { wch: 8 }, { wch: 12 }, { wch: 30 }, { wch: 11 }, { wch: 11 }];
+      var wb = window.XLSX.utils.book_new(); window.XLSX.utils.book_append_sheet(wb, ws, '구매기록');
+      window.XLSX.writeFile(wb, name + '.xlsx');
+    } else {
+      download(name + '.csv', '﻿' + [head].concat(rows).map(function (r) { return r.map(csvCell).join(','); }).join('\r\n'), 'text/csv;charset=utf-8');
+    }
+    toast(list.length + '건을 내보냈습니다.');
   }
 
   /* ---------- 관리자 탭 ---------- */
@@ -887,17 +1227,46 @@
         var pre = assignDefaults(r);
         body += '<tr data-id="' + esc(r.id) + '">'
           + '<td class="text-nowrap"><div>' + fmtDate(r.createdAt) + '</div><div class="small text-secondary">' + esc(r.requesterName) + '</div></td>'
-          + '<td>' + itemCell(r) + '</td>'
+          + '<td>' + itemCell(r) + suggestHtml(r, pre.cat) + '</td>'
           + amountCell(r)
           + '<td><select class="form-select form-select-sm" data-role="assign-project">' + projectOptions(r.amount, pre.cat, pre.projectId) + '</select>' + cardUsersHint(pre.projectId) + '</td>'
           + '<td><select class="form-select form-select-sm" data-role="assign-cat">' + catOptions(pre.cat) + '</select></td>'
-          + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-primary" data-action="assign">처리</button> '
+          + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-primary" data-action="assign">승인</button> '
           + '<button type="button" class="btn btn-sm btn-outline-danger" data-action="reject">반려</button> '
           + '<button type="button" class="btn btn-sm btn-ghost-secondary btn-icon" data-action="edit-request" title="수정"><i class="ti ti-edit"></i></button></td>'
           + '</tr>';
       });
       body += '</tbody></table></div>';
     }
+
+    /* 구매자 반려 신청: 승인하면 요청 반려(가처리 해제), 거절하면 계속 진행 */
+    var cancelReqs = state.requests.filter(function (r) { return BUD.purchaseState(r) === 'cancelRequested'; });
+    if (cancelReqs.length) {
+      body += '<div class="card-body pb-2 border-top"><h3 class="card-title mb-0"><i class="ti ti-arrow-back-up me-1 text-orange"></i>반려 신청 <span class="badge bg-orange-lt ms-1">' + cancelReqs.length + '</span></h3></div>'
+        + '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th class="w-1">신청 / 요청자</th><th>품명</th><th class="text-end">금액</th><th>반려 사유</th><th class="w-1"></th></tr></thead><tbody>'
+        + cancelReqs.map(function (r) {
+          var cr = r.meta.cancelRequest, p = projectById(r.projectId);
+          return '<tr data-id="' + esc(r.id) + '"><td class="text-nowrap"><div>' + fmtDate(cr.at) + '</div><div class="small text-secondary">' + esc(r.requesterName) + '</div></td>'
+            + '<td><div class="fw-medium">' + esc(r.item) + '</div><div class="small text-secondary">' + esc(p ? (p.alias || p.name) : '') + ' · ' + esc(catLabel(poolOf(r.category))) + '</div></td>'
+            + '<td class="text-end tnum text-nowrap">' + won(r.amount) + '</td><td class="small">' + esc(cr.reason) + '</td>'
+            + '<td class="text-end text-nowrap"><button type="button" class="btn btn-sm btn-danger" data-action="resolve-cancel" data-approve="1">반려 처리</button> <button type="button" class="btn btn-sm" data-action="resolve-cancel" data-approve="0">거절</button></td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+
+    /* 승인됐지만 구매 확정 전(가처리): 관리자가 승인 취소 가능 */
+    var provisional = state.requests.filter(function (r) { return r.kind !== 'meeting' && BUD.purchaseState(r) === 'provisional'; });
+    body += '<div class="card-body pb-2 border-top"><h3 class="card-title mb-0"><i class="ti ti-hourglass me-1 text-primary"></i>구매 확정 대기 (가처리) <span class="badge bg-blue-lt ms-1">' + provisional.length + '</span></h3>'
+      + '<div class="small text-secondary mt-1">승인한 건은 구매자가 보고서를 쓰고 구매 확정을 누를 때까지 예산에 가처리됩니다. 확정 전에는 승인을 취소할 수 있습니다.</div></div>';
+    if (!provisional.length) body += '<div class="card-body pt-0"><div class="text-secondary small">구매 확정을 기다리는 건이 없습니다.</div></div>';
+    else body += '<div class="table-responsive"><table class="table table-vcenter card-table"><thead><tr><th class="w-1">승인 / 요청자</th><th>품명</th><th class="text-end">금액</th><th>과제</th><th class="w-1">보고서</th><th class="w-1"></th></tr></thead><tbody>'
+      + provisional.map(function (r) {
+        var p = projectById(r.projectId);
+        return '<tr data-id="' + esc(r.id) + '"><td class="text-nowrap"><div>' + fmtDate(r.processedAt) + '</div><div class="small text-secondary">' + esc(r.requesterName) + '</div></td>'
+          + '<td class="fw-medium">' + esc(r.item) + '</td><td class="text-end tnum text-nowrap">' + won(r.amount) + '</td>'
+          + '<td>' + esc(p ? (p.alias || p.name) : '-') + '<div class="small text-secondary">' + esc(catLabel(poolOf(r.category))) + '</div></td>'
+          + '<td>' + reportBadge(r) + '</td>'
+          + '<td class="text-end"><button type="button" class="btn btn-sm btn-outline-secondary" data-action="revoke-approval"><i class="ti ti-arrow-back-up me-1"></i>승인 취소</button></td></tr>';
+      }).join('') + '</tbody></table></div>';
 
     body += '<div class="card-body pb-2 border-top"><h3 class="card-title mb-0"><i class="ti ti-shield-check me-1 text-primary"></i>구매 심의 대기 <span class="badge bg-yellow-lt ms-1">' + rvPending.length + '</span></h3></div>';
     if (!rvPending.length) {
@@ -910,13 +1279,13 @@
     }
 
     var editing = state.editingProjectId ? projectById(state.editingProjectId) : null;
-    var budgetInputs = CATS.map(function (c) {
-      return '<div class="col-6 col-md-3"><label class="form-label">' + esc(c.label) + '</label><input type="number" class="form-control tnum" name="budget_' + esc(c.id) + '" min="0" step="1" value="' + (editing ? budgetOf(editing, c.id) : '') + '" placeholder="0"></div>';
+    var budgetInputs = BUD.POOLS.map(function (c) {
+      return '<div class="col-6 col-md-4"><label class="form-label">' + esc(c.label) + '</label><input type="number" class="form-control tnum" name="budget_' + esc(c.id) + '" min="0" step="1" value="' + (editing ? budgetOf(editing, c.id) : '') + '" placeholder="0"></div>';
     }).join('');
 
     /* 과제 예산 현황 (관리자 탭에 통합) */
-    var budgetView = renderBudgetTab();
-    var after = '<div class="card mb-3"><div class="card-header"><h3 class="card-title"><i class="ti ti-wallet me-1 text-primary"></i>과제 예산 현황</h3></div>' + budgetView.body + '</div>';
+    var budgetView = renderBudgetDashboard();
+    var after = '<div class="card mb-3"><div class="card-header"><h3 class="card-title"><i class="ti ti-wallet me-1 text-primary"></i>과제 예산 현황 <span class="badge bg-secondary-lt ms-1"><i class="ti ti-lock me-1"></i>관리자 전용</span></h3></div>' + budgetView.body + '</div>';
 
     after += '<div class="row row-cards mb-3">'
       + '<div class="col-lg-5"><div class="card"><div class="card-header"><h3 class="card-title"><i class="ti ti-' + (editing ? 'edit' : 'folder-plus') + ' me-1 text-primary"></i>' + (editing ? '과제 수정' : '과제 추가') + '</h3>'
@@ -927,7 +1296,6 @@
       + '<div class="col-6"><label class="form-label">연구책임자</label><input type="text" class="form-control" name="manager" value="' + esc(editing ? editing.manager : '') + '" placeholder="김교수"></div>'
       + '<div class="col-6"><label class="form-label">약칭 <span class="form-label-description">참여과제 시트의 과제 이름</span></label><input type="text" class="form-control" name="alias" value="' + esc(editing ? (editing.alias || '') : '') + '" placeholder="우수신진"></div>'
       + '<div class="col-6"><label class="form-label">참여자 <span class="form-label-description">회의비 참석자 후보 · 시트에서 가져옴</span></label><div class="form-control-plaintext small text-secondary">' + (editing && editing.participants && editing.participants.length ? esc(editing.participants.map(function (x) { return x.name; }).join(', ')) : '없음 (회의비 페이지 관리자 탭에서 시트 가져오기)') + '</div></div>'
-      + '<div class="col-12"><label class="form-label">과제 담당자 <span class="form-label-description">쉼표 구분 · 관리자가 아니어도 이 과제 예산을 봅니다</span></label><input type="text" class="form-control" name="owners" value="' + esc(editing && editing.owners ? editing.owners.join(', ') : '') + '" placeholder="예: 백승훈, 이현진"></div>'
       + '<div class="col-6"><label class="form-label">계정책임자 <span class="form-label-description">보고서 기본값</span></label><input type="text" class="form-control" name="accountManager" value="' + esc(editing ? (editing.accountManager || '') : (CFG.report && CFG.report.defaultAccountManager || '')) + '" placeholder="권지민"></div>'
       + '<div class="col-6"><label class="form-label">카드 실사용자 목록 <span class="form-label-description">참여연구원, 쉼표 구분</span></label><input type="text" class="form-control" name="cardUsers" value="' + esc(editing && editing.cardUsers ? editing.cardUsers.join(', ') : '') + '" placeholder="박민호, 위동진"></div>'
       + '<div class="col-6"><label class="form-label">시작일</label><input type="date" class="form-control" name="startDate" value="' + esc(editing ? editing.startDate : '') + '"></div>'
@@ -951,7 +1319,7 @@
         }).join(' · ');
         after += '<tr data-id="' + esc(p.id) + '"><td><div class="fw-medium">' + esc(p.name) + '</div>'
           + '<div class="small text-secondary">' + esc(p.code) + (p.active === false ? ' · 종료' : '') + (catLine ? ' · ' + catLine : '') + '</div>'
-          + (p.owners && p.owners.length ? '<div class="small"><span class="badge bg-green-lt"><i class="ti ti-user-star me-1"></i>담당 ' + esc(p.owners.join(', ')) + '</span></div>' : '<div class="small text-secondary">담당자 미지정</div>') + '</td>'
+          + (BUD.isExcluded(p) ? '<div class="small"><span class="badge bg-secondary-lt">예산 관리 제외</span></div>' : BUD.base(p) ? '<div class="small text-secondary">행정 현황 ' + esc(BUD.base(p).date) + ' 기준' + (BUD.isUnified(p) ? ' · 통합 잔액' : '') + '</div>' : '') + '</td>'
           + '<td class="text-end tnum text-nowrap">' + won(s.total) + '</td>'
           + '<td class="text-end tnum text-nowrap">' + won(s.actual) + '<div class="small text-secondary">가 ' + won(s.provisional) + '</div></td>'
           + '<td class="text-end tnum text-nowrap' + (s.remain < 0 ? ' text-danger' : '') + '">' + won(s.remain) + '</td>'
@@ -1239,7 +1607,12 @@
       + '<div class="col-sm-7"><label class="form-label">구매처 / 링크</label><input type="url" class="form-control" name="link" value="' + esc(r.link) + '"></div>'
       + '<div class="col-6"><label class="form-label required">수량</label><input type="number" class="form-control" name="qty" min="1" step="1" required value="' + esc(r.qty) + '"></div>'
       + '<div class="col-6"><label class="form-label required">단가 (원)</label><input type="number" class="form-control" name="unitPrice" min="0" step="1" required value="' + esc(r.unitPrice) + '"></div>'
-      + '<div class="col-12"><label class="form-label">용도 / 메모</label><textarea class="form-control" name="note" rows="2">' + esc(r.note) + '</textarea></div>'
+      + '<div class="col-12"><label class="form-label">사용 용도 <span class="form-label-description">어떤 용도로 쓰는지 상세히</span></label><textarea class="form-control" name="note" rows="3">' + esc(r.note) + '</textarea></div>'
+      + (r.kind !== 'meeting' ? '<div class="col-sm-6"><label class="form-label">구매 주기</label><select class="form-select" name="cycle">' + cycleOptions((r.meta && r.meta.cycle) || '') + '</select></div>'
+        + '<div class="col-sm-6"><label class="form-label">구매 이력</label><select class="form-select" name="history">' + [['', '선택…'], ['new', '신규 구매'], ['repeat', '재구매']].map(function (o) { return '<option value="' + o[0] + '"' + (((r.meta && r.meta.history) || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') + '</select></div>'
+        + '<div class="col-sm-6"><label class="form-label">팀</label><select class="form-select" name="team">' + teamOptions((r.meta && r.meta.team) || '') + '</select></div>'
+        + '<div class="col-sm-6"><label class="form-label">컨펌한 사람</label><input type="text" class="form-control" name="confirmedBy" value="' + esc((r.meta && r.meta.confirmedBy) || '') + '"></div>'
+        + '<div class="col-sm-6"><label class="form-label">가장 관련 있는 과제</label><select class="form-select" name="relatedProjectId">' + relatedOptions(r.meta && r.meta.relatedUnknown ? 'unknown' : ((r.meta && r.meta.suggestedProjectId) || '')) + '</select></div>' : '')
       + (admin ? '<div class="col-12"><label class="form-label">관리자 메모 <span class="form-label-description">반려 시 신청자에게 표시</span></label><input type="text" class="form-control" name="adminNote" value="' + esc(r.adminNote) + '"></div>' : '')
       + '</div>';
     return dialog({ title: '요청 수정', bodyHtml: body, size: 'lg', okLabel: '저장' }).then(function (v) {
@@ -1247,6 +1620,10 @@
       var qty = Math.max(1, parseInt(v.qty, 10) || 1);
       var unit = Math.max(0, Math.round(Number(v.unitPrice) || 0));
       var patch = { item: v.item.trim(), category: normCat(v.category), link: v.link.trim(), qty: qty, unitPrice: unit, amount: qty * unit, note: v.note.trim() };
+      if (v.cycle !== undefined) {
+        patch.meta = Object.assign({}, r.meta || {}, { cycle: v.cycle, history: v.history || '', team: v.team, confirmedBy: (v.confirmedBy || '').trim(), confirmRoute: needsProfessor(qty * unit) ? 'professor' : 'team',
+          suggestedProjectId: v.relatedProjectId === 'unknown' ? '' : v.relatedProjectId, relatedUnknown: v.relatedProjectId === 'unknown' });
+      }
       if (admin) patch.adminNote = v.adminNote.trim();
       return store.updateRequest(id, patch).then(function () { toast('요청을 수정했습니다.'); touchUnlock(); return refresh(); });
     });
@@ -1258,12 +1635,12 @@
     return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   }
   function exportCsv(list) {
-    var head = ['요청일', '신청자', '품명', '비목', '수량', '단가', '합계', '상태', '배정 과제', '과제번호', '연결 심의', '처리일', '처리자', '메모', '반려 사유', '링크'];
+    var head = ['요청일', '신청자', '품명', '비목', '수량', '단가', '합계', '상태', '배정 과제', '과제번호', '연결 심의', '처리일', '처리자', '사용 용도', '구매 주기', '팀', '컨펌한 사람', '관련 과제', '반려 사유', '링크'];
     var rows = list.map(function (r) {
       var p = r.projectId ? projectById(r.projectId) : null;
       var rv = r.reviewId ? reviewById(r.reviewId) : null;
       return [localDate(r.createdAt), r.requesterName, r.item, catLabel(normCat(r.category)), r.qty, r.unitPrice, r.amount,
-        (STATUS[r.status] || { label: r.status }).label, p ? p.name : '', p ? p.code : '', rv ? rv.title : (r.reviewId ? '연결됨' : ''), localDate(r.processedAt), r.processedBy || '', r.note, r.status === 'rejected' ? r.adminNote : '', r.link].map(csvCell).join(',');
+        (STATUS[r.status] || { label: r.status }).label, p ? p.name : '', p ? p.code : '', rv ? rv.title : (r.reviewId ? '연결됨' : ''), localDate(r.processedAt), r.processedBy || '', r.note, (r.meta && r.meta.cycle) || '', (r.meta && r.meta.team) || '', (r.meta && r.meta.confirmedBy) || '', relatedName(r), r.status === 'rejected' ? r.adminNote : '', r.link].map(csvCell).join(',');
     });
     var q = state.query;
     var name = 'dsil-requests-' + (q.from || 'all') + '_' + (q.to || 'all') + '.csv';
@@ -1276,6 +1653,7 @@
     Array.prototype.forEach.call(form.elements, function (el) {
       if (!el.name) return;
       if (el.type === 'checkbox') out[el.name] = el.checked;
+      else if (el.type === 'radio') { if (el.checked) out[el.name] = el.value; else if (!(el.name in out)) out[el.name] = ''; }   /* 고른 것만 (ui.js readForm 과 같게) */
       else out[el.name] = el.value;
     });
     return out;
@@ -1323,8 +1701,22 @@
       var r = readForm(form);
       var qty = Math.max(1, parseInt(r.qty, 10) || 1);
       var unit = Math.max(0, Math.round(Number(r.unitPrice) || 0));
-      if (!r.item.trim()) { toast('품명을 입력하세요.', true); return; }
-      store.createRequest({ item: r.item.trim(), category: normCat(r.category), link: r.link.trim(), qty: qty, unitPrice: unit, amount: qty * unit, note: r.note.trim(), reviewId: r.reviewId || null })
+      if (!markMissing(form, [
+        { name: 'item', label: '품명', ok: !!r.item.trim() },
+        { name: 'link', label: '구매처 링크(https://…)', ok: /^https?:\/\/\S+\.\S+/.test(r.link.trim()) },
+        { name: 'history', label: '구매 이력(신규/재구매)', ok: r.history === 'new' || r.history === 'repeat' },
+        { name: 'unitPrice', label: '단가', ok: String(r.unitPrice).trim() !== '' && Number(r.unitPrice) >= 0 },
+        { name: 'note', label: '사용 용도(' + USAGE_MIN + '자 이상으로 상세히)', ok: r.note.trim().length >= USAGE_MIN },
+        { name: 'cycle', label: '구매 주기', ok: !!r.cycle },
+        { name: 'team', label: '팀', ok: !!r.team },
+        { name: 'confirmedBy', label: '컨펌한 사람', ok: !!r.confirmedBy.trim() },
+        { name: 'relatedProjectId', label: '가장 관련 있는 과제', ok: !!r.relatedProjectId }
+      ])) return;
+      var prevBuys = previousPurchases(r.item);
+      var meta = { cycle: r.cycle, history: r.history, prevPurchase: prevBuys[0] ? { at: prevBuys[0].at, by: prevBuys[0].by, amount: prevBuys[0].amount } : null,
+        team: r.team, confirmedBy: r.confirmedBy.trim(), confirmRoute: needsProfessor(qty * unit) ? 'professor' : 'team',
+        suggestedProjectId: r.relatedProjectId === 'unknown' ? '' : r.relatedProjectId, relatedUnknown: r.relatedProjectId === 'unknown' };
+      store.createRequest({ item: r.item.trim(), category: normCat(r.category), link: r.link.trim(), qty: qty, unitPrice: unit, amount: qty * unit, note: r.note.trim(), reviewId: r.reviewId || null, meta: meta })
         .then(function () { toast('요청을 제출했습니다. 관리자 처리 후 상태가 바뀝니다.'); return refresh(); })
         .catch(handleError);
     }
@@ -1353,12 +1745,13 @@
       var p = readForm(form);
       var id = form.getAttribute('data-id') || null;
       if (!p.name.trim()) { toast('과제명을 입력하세요.', true); return; }
+      var prev = id ? projectById(id) : null;
       var budgets = {};
-      CAT_IDS.forEach(function (c) { budgets[c] = Math.max(0, Math.round(Number(p['budget_' + c]) || 0)); });
-      var rec = { code: p.code.trim(), name: p.name.trim(), budgets: budgets, startDate: p.startDate, endDate: p.endDate, manager: p.manager.trim(), note: p.note.trim(), active: !!p.active,
+      CAT_IDS.forEach(function (c) { budgets[c] = BUD.POOL_IDS.indexOf(c) >= 0 ? Math.max(0, Math.round(Number(p['budget_' + c]) || 0)) : 0; });
+      /* 폼에 없는 필드(참여자·행정 현황 기준 등)는 그대로 유지 */
+      var rec = Object.assign({}, prev || {}, { code: p.code.trim(), name: p.name.trim(), budgets: budgets, startDate: p.startDate, endDate: p.endDate, manager: p.manager.trim(), note: p.note.trim(), active: !!p.active,
         alias: (p.alias || '').trim(), accountManager: (p.accountManager || '').trim(),
-        owners: String(p.owners || '').split(/[,\n、]/).map(function (s) { return s.trim(); }).filter(Boolean),
-        cardUsers: String(p.cardUsers || '').split(/[,\n、]/).map(function (s) { return s.trim(); }).filter(Boolean) };
+        cardUsers: String(p.cardUsers || '').split(/[,\n、]/).map(function (s) { return s.trim(); }).filter(Boolean) });
       if (id) rec.id = id;
       store.saveProject(rec).then(function () { toast(id ? '과제를 수정했습니다.' : '과제를 추가했습니다.'); state.editingProjectId = null; touchUnlock(); return refresh(); }).catch(handleError);
     }
@@ -1371,6 +1764,15 @@
       var unit = Math.max(0, Number(rf.unitPrice.value) || 0);
       rf.amountView.value = won(qty * unit);
       var tier = $('#request-tier'); if (tier) tier.innerHTML = qty * unit > 0 ? '적용 절차 ' + tierBadge(qty * unit) : '';
+      var guide = $('#confirm-guide'); if (guide) guide.innerHTML = confirmGuideHtml(qty * unit);
+      if (e.target.name === 'item') {
+        var hh = $('#history-hint'); if (hh) hh.innerHTML = historyHintHtml(rf.item.value);
+        /* 이력이 있으면 재구매로 미리 표시 (사용자가 직접 고른 뒤에는 건드리지 않음) */
+        if (!rf.getAttribute('data-history-touched')) {
+          var found = previousPurchases(rf.item.value).length > 0;
+          $all('input[name="history"]', rf).forEach(function (x) { x.checked = found ? x.value === 'repeat' : false; });
+        }
+      }
       return;
     }
     var vf = e.target.closest('#review-form');
@@ -1388,6 +1790,13 @@
     var el = e.target;
     var action = el.getAttribute('data-action');
     var role = el.getAttribute('data-role');
+    if (el.name === 'history' && el.form && el.form.id === 'request-form') el.form.setAttribute('data-history-touched', '1');
+    if (role === 'history-q') { state.historyQ = el.value; render(); return; }
+    /* 팀을 고르면 그 팀 중간관리자 이름을 채움 (비어 있거나 다른 팀 중간관리자로 채워져 있을 때만) */
+    if (el.name === 'team' && el.form && el.form.elements.confirmedBy) {
+      var cb = el.form.elements.confirmedBy, mgrs = PR.teams.map(function (t) { return t.manager; }).filter(Boolean);
+      if (teamManager(el.value) && (!cb.value.trim() || mgrs.indexOf(cb.value.trim()) >= 0)) cb.value = teamManager(el.value);
+    }
     var qf = el.closest('#query-form');
     if (qf && el.name !== 'q') { applyQueryForm(qf); render(); return; }
     var xf = el.closest('#export-form');
@@ -1402,11 +1811,14 @@
       };
       reader.readAsText(el.files[0]);
     }
+    if (action === 'import-budget' && el.files && el.files[0]) { importBudgetFile(el.files[0]); el.value = ''; return; }
     if (role === 'assign-cat') {
       var row = el.closest('tr[data-id]');
       var sel = row && row.querySelector('select[data-role="assign-project"]');
       var req = row && requestById(row.getAttribute('data-id'));
       if (sel && req) sel.innerHTML = projectOptions(req.amount, normCat(el.value), sel.value);
+      var sg = row && row.querySelector('[data-role="suggest"]');
+      if (sg && req) sg.outerHTML = suggestHtml(req, el.value);
     }
     if (role === 'assign-project') {
       /* 과제를 고르면 그 과제의 카드 실사용자 목록을 바로 보여줌 */
@@ -1432,7 +1844,7 @@
       case 'tab': {
         e.preventDefault();
         var t = btn.getAttribute('data-tab');
-        if (t === 'budget' && isAdminEligible() && !isOwnerAnywhere()) t = 'admin';  /* 담당 과제가 없는 관리자는 관리자 탭으로 */
+        if (t === 'budget') t = 'admin';
         if (t === 'admin' && !isAdminActive()) { enterAdmin('admin'); return; }
         if (btn.getAttribute('data-mine')) { state.query.mine = true; state.query.preset = 'all'; state.query.from = ''; state.query.to = ''; }
         state.tab = t; render();
@@ -1440,8 +1852,10 @@
       }
       case 'unlock-admin':
         enterAdmin('admin'); break;
-      case 'unlock-budget':
-        enterAdmin('admin'); break;
+      case 'budget-sort':
+        state.budgetSort = btn.getAttribute('data-sort'); touchUnlock(); render(); break;
+      case 'export-purchase-log':
+        exportPurchaseLog(); touchUnlock(); break;
       case 'lock-admin':
         setUnlock(false); state.tab = 'requests'; toast('관리자 화면을 잠갔습니다.'); refresh(); break;
       case 'refresh':
@@ -1489,6 +1903,11 @@
           return store.deleteReview(id).then(function () { toast('심의를 삭제했습니다.'); touchUnlock(); return refresh(); });
         }).catch(handleError);
         break;
+      case 'assign-pick':
+        /* 추천 과제 버튼: 그 과제를 고른 상태로 아래 처리와 같은 확인을 거침 */
+        var pickSel = row && row.querySelector('select[data-role="assign-project"]');
+        if (pickSel) pickSel.value = btn.getAttribute('data-project');
+        /* falls through */
       case 'assign': {
         var sel = row.querySelector('select[data-role="assign-project"]');
         var catSel = row.querySelector('select[data-role="assign-cat"]');
@@ -1501,15 +1920,20 @@
         var remain = stats.byCat[cat].remain;
         var linkedRv = req.reviewId ? reviewById(req.reviewId) : null;
         /* 심의 연결 건은 그 심의의 가할당이 실집행으로 바뀌므로, 잔액 판정에 그만큼을 더해 준다 */
-        if (linkedRv && linkedRv.status === 'approved' && linkedRv.projectId === pid && normCat(linkedRv.category) === cat) remain += reviewProvisional(linkedRv);
+        if (linkedRv && linkedRv.status === 'approved' && linkedRv.projectId === pid && (BUD.isUnified(proj) || poolOf(linkedRv.category) === poolOf(cat))) remain += reviewProvisional(linkedRv);
         var over = (Number(req.amount) || 0) > remain;
-        var ask = over
-          ? confirmDlg({ title: '비목 예산 초과', message: '이 과제의 ' + catLabel(cat) + ' 잔액은 ' + won(remain) + '이고 요청 금액은 ' + won(req.amount) + '입니다. 그래도 배정할까요?', okLabel: '초과 배정', danger: true })
-          : Promise.resolve(true);
+        var urg = BUD.urgency(proj);
+        if (!over && urg.check) over = null;   /* 집행 전 확인 과제: 아래에서 따로 확인 */
+        /* 승인은 항상 팝업으로 한 번 더 확인 (예산 초과·집행 전 확인 과제면 경고를 함께) */
+        var summaryLine = '「' + req.item + '」 ' + won(req.amount) + ' → ' + (proj.alias || proj.name) + ' · ' + catLabel(cat) + ' (잔액 ' + won(remain) + ')';
+        var warn = over === null ? ' 이 과제는 행정 현황에 "' + ((BUD.base(proj) || {}).status || '집행 전 확인') + '"로 표시되어 있습니다.'
+          : over ? ' 요청 금액이 이 세목 잔액보다 많습니다.' : '';
+        var ask = confirmDlg({ title: over ? '예산 초과 · 승인하시겠습니까?' : '승인하시겠습니까?', message: summaryLine + '.' + warn + ' 승인하면 예산에 가처리되고, 구매자가 구매 확정을 하면 차감이 확정됩니다.',
+          okLabel: over ? '초과 승인' : '승인', danger: !!over });
         ask.then(function (ok) {
           if (!ok) return;
           return store.updateRequest(id, { status: 'done', projectId: pid, category: cat, processedAt: new Date().toISOString(), processedBy: state.session.user.name, adminNote: '' })
-            .then(function () { toast('처리 완료: ' + proj.name + ' · ' + catLabel(cat)); touchUnlock(); return refresh(); });
+            .then(function () { toast('승인했습니다: ' + (proj.alias || proj.name) + ' · ' + catLabel(cat) + ' (가처리)'); touchUnlock(); return refresh(); });
         }).catch(handleError);
         break;
       }
@@ -1524,6 +1948,44 @@
         store.updateRequest(id, { status: 'pending', projectId: null, processedAt: null, processedBy: null, adminNote: '' })
           .then(function () { toast('미처리로 되돌렸습니다.'); touchUnlock(); return refresh(); }).catch(handleError);
         break;
+      case 'revoke-approval': {
+        /* 관리자 승인 취소: 구매 확정 전까지만. 가처리가 풀리고 미처리로 돌아감 */
+        var rq = requestById(id);
+        if (rq && BUD.isConfirmed(rq)) { toast('구매 확정된 요청은 승인을 취소할 수 없습니다.', true); return; }
+        confirmDlg({ title: '승인 취소', message: '「' + (rq ? rq.item : '') + '」 승인을 취소할까요? 예산 가처리가 풀리고 미처리로 돌아갑니다. 작성 중인 보고서는 남습니다.', okLabel: '승인 취소', danger: true }).then(function (ok) {
+          if (!ok) return;
+          var meta = Object.assign({}, rq.meta || {}); delete meta.cancelRequest;
+          return store.updateRequest(id, { status: 'pending', projectId: null, processedAt: null, processedBy: null, adminNote: '', meta: meta })
+            .then(function () { toast('승인을 취소했습니다. 미처리로 돌아갔습니다.'); touchUnlock(); return refresh(); });
+        }).catch(handleError);
+        break;
+      }
+      case 'cancel-request':
+        promptDlg({ title: '반려 신청', message: '구매를 취소하려는 사유를 적어 주세요. 관리자가 확인하면 요청이 반려되고 예산 가처리가 풀립니다.', input: 'textarea', placeholder: '예: 다른 과제 물품으로 대체, 구매처 품절', okLabel: '반려 신청', danger: true }).then(function (reason) {
+          if (reason === null) return;
+          if (!reason.trim()) { toast('반려 신청 사유를 적어 주세요.', true); return; }
+          return store.requestPurchaseCancel(id, reason).then(function () { toast('반려 신청을 넣었습니다. 관리자 처리를 기다려 주세요.'); return refresh(); });
+        }).catch(handleError);
+        break;
+      case 'resolve-cancel': {
+        var approve = btn.getAttribute('data-approve') === '1';
+        promptDlg({ title: approve ? '반려 신청 승인' : '반려 신청 거절', message: approve ? '요청을 반려하고 예산 가처리를 풉니다. 메모가 있으면 적어 주세요(선택).' : '거절 사유를 적어 주세요. 구매자에게 표시됩니다.', input: 'textarea', okLabel: approve ? '반려 처리' : '거절', danger: approve }).then(function (note) {
+          if (note === null) return;
+          return store.resolvePurchaseCancel(id, approve, note).then(function () { toast(approve ? '반려 처리했습니다.' : '반려 신청을 거절했습니다.'); touchUnlock(); return refresh(); });
+        }).catch(handleError);
+        break;
+      }
+      case 'delete-history': {
+        var hid = btn.getAttribute('data-history');
+        var h = state.history.filter(function (x) { return x.id === hid; })[0];
+        confirmDlg({ title: '구매 이력 삭제', message: '「' + (h ? h.item : '') + '」 구매 이력을 삭제할까요? 구매 요청과는 별개로 이 시트에서만 지워지며 되돌릴 수 없습니다.', okLabel: '삭제', danger: true }).then(function (ok) {
+          if (!ok) return;
+          return store.deletePurchaseHistory(hid).then(function () { toast('구매 이력을 삭제했습니다.'); touchUnlock(); return refresh(); });
+        }).catch(handleError);
+        break;
+      }
+      case 'export-history':
+        exportPurchaseLog(); break;
       case 'edit-request':
         editRequest(id).catch(handleError); break;
       case 'delete-request': {

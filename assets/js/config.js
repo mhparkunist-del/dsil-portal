@@ -45,14 +45,52 @@ window.DSIL_CONFIG = {
   /* PIN 을 맞힌 뒤 관리자 잠금이 유지되는 시간(분). 지나면 다시 묻습니다. */
   adminUnlockMinutes: 10,
 
-  /* 과제 예산 비목. id 는 저장 키이므로 운영 중에 바꾸지 마세요. label 은 자유롭게 수정 가능. */
+  /* 과제 예산 비목. id 는 저장 키이므로 운영 중에 바꾸지 마세요. label 은 자유롭게 수정 가능.
+     pool 이 없는 비목이 행정 연구비 현황의 세목(연구재료비·연구활동비·연구시설·장비비)이고,
+     pool 이 있는 비목은 그 세목에서 차감됩니다 (회의비 → 연구활동비). */
   budgetCategories: [
-    { id: 'material',  label: '재료비' },
+    { id: 'material',  label: '연구재료비' },
     { id: 'activity',  label: '연구활동비' },
-    { id: 'equipment', label: '장비구매비' },
-    { id: 'meeting',   label: '회의비' },
-    { id: 'other',     label: '기타' }
+    { id: 'equipment', label: '연구시설·장비비' },
+    { id: 'meeting',   label: '회의비', pool: 'activity' },
+    { id: 'other',     label: '기타', pool: 'material' }
   ],
+
+  /* 과제 예산 (관리자 전용). 금액은 이 파일에 넣지 않습니다 (공개 저장소).
+     관리자가 구매 요청 > 관리자 탭에서 행정 연구비 현황 엑셀을 올리면 그 브라우저(공용 DB 모드에서는 DB)에만 저장됩니다. */
+  budget: {
+    refreshDays: 14,            /* 행정 현황 갱신 주기(일). 기준일이 이보다 오래되면 갱신 안내 */
+    mustSpendDays: 120,         /* 종료일까지 이 일수 이하로 남으면 '종료 임박' */
+    recentCheckDays: 7,         /* 기준일 직전 이 기간에 처리한 건은 행정 잔액 반영 여부 확인 대상으로 표시 */
+    /* 예산 관리·배정에서 빼는 과제 (참여과제 시트 약칭 또는 엑셀 구분, 이름에 포함되면 제외) */
+    excludeAliases: ['개인과제', '이노코어', '성장형포스닥', '기본과제'],
+    /* 엑셀 '구분' → 참여과제 시트 약칭. 같은 이름이면 적지 않아도 됩니다 */
+    aliasMap: {
+      '차세대지능형반도체': '차지반',
+      'K-Chips 정부': 'K-chips(정)',
+      'K-Chips 민간': 'K-chips(민)',
+      '연구개발특구': '개발특구',
+      'AI Science Hub': 'AI사이언스허브',
+      'AIP 위탁 IITP': 'IITP'
+    }
+  },
+
+  /* 구매 요청 컨펌 절차
+     professorThreshold 이하: 각 팀 중간관리자가 컨펌 (필요하면 중간관리자가 판단해 교수님께 컨펌)
+     professorThreshold 초과: 구매행정 시스템으로 교수님 컨펌
+     teams[].manager 는 중간관리자 이름 (정해지면 채우세요. 비우면 요청자가 직접 적음) */
+  purchaseRequest: {
+    teams: [
+      { id: 'CP',     manager: '' },
+      { id: 'RF',     manager: '' },
+      { id: 'Logic',  manager: '' },
+      { id: 'Memory', manager: '' },
+      { id: 'DB',     manager: '' }
+    ],
+    professorThreshold: 5000000,
+    cycles: ['일회성', '매주', '매월', '분기(3개월)', '반기(6개월)', '연 1회', '비정기(필요할 때마다)'],
+    usageMinLength: 10
+  },
 
   /* 구매 절차 기준 (KAIST). 금액이 upTo 이하이면 해당 단계, null 은 상한 없음. 위에서부터 차례로 판정. */
   procurementTiers: [
